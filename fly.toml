@@ -1,0 +1,21 @@
+app = "elaina-wa-bot"
+primary_region = "sin"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 7860
+  force_https = true
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"
+
+# Simpan session WhatsMeow di volume agar tidak perlu scan QR tiap restart
+[[mounts]]
+  source = "data"
+  destination = "/data"
