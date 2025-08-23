@@ -27,9 +27,13 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	// Downloader TikTok (sudah ada)
 	// GANTI sesuai module kamu, contoh:
 	// dl "github.com/daunk852/wa-elaina-bot/downloader"
 	dl "wa-elaina/downloader"
+
+	// Fitur Blue Archive (baru)
+	anime "wa-elaina/anime"
 )
 
 var (
@@ -56,6 +60,11 @@ var (
 
 	// batas kata khusus VN
 	vnMaxWords int
+
+	// ====== Blue Archive ======
+	baLinks      []string // cache link gambar
+	baURL        string   // BA_LINKS_URL (remote JSON)
+	baLocalPath  string   // BA_LINKS_LOCAL (fallback file lokal)
 )
 
 func init() {
@@ -95,6 +104,12 @@ func init() {
 	} else {
 		vnMaxWords = 80
 	}
+
+	// Blue Archive env (baru)
+	// Remote URL dari .env: BA_LINKS_URL
+	// Fallback lokal: BA_LINKS_LOCAL (default "anime/bluearchive_links.json")
+	baURL       = getenv("BA_LINKS_URL", "")
+	baLocalPath = getenv("BA_LINKS_LOCAL", "anime/bluearchive_links.json")
 }
 
 func main() {
@@ -175,7 +190,7 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 	userText := extractText(msg)
 	if userText == "" { return }
 
-	// — TikTok auto
+	// — TikTok auto (tetap ada, tidak diubah)
 	if urls := dl.DetectTikTokURLs(userText); len(urls) > 0 {
 		reply, err := dl.HandleTikTok(httpClient, urls)
 		if err != nil {
@@ -186,7 +201,7 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 		return
 	}
 
-	// — Mode MANUAL (grup) —> trigger boleh di mana saja
+	// — Mode MANUAL (grup) —> trigger boleh di mana saja (tetap sama)
 	if isGroup && mode == "MANUAL" {
 		low := strings.ToLower(userText)
 		if trigger == "" { trigger = "elaina" }
@@ -214,7 +229,28 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 		if userText == "" { userText = "hai" }
 	}
 
-	// — Apakah user minta VN? (boleh di mana saja)
+	// — Blue Archive request (BARU) — berlaku setelah pembersihan trigger di grup
+	//    Deteksi pakai anime.IsBARequest, kirim 1 gambar acak via anime.SendRandomImage
+	//    Links dimuat sekali via anime.LoadLinks dari BA_LINKS_URL (remote) atau BA_LINKS_LOCAL.
+	if anime.IsBARequest(userText) { // :contentReference[oaicite:4]{index=4}
+		if len(baLinks) == 0 {
+			links, err := anime.LoadLinks(context.Background(), baLocalPath, baURL) // :contentReference[oaicite:5]{index=5}
+			if err != nil {
+				log.Println("BA LoadLinks error:", err)
+				_ = sendText(client, destJID(to), "Maaf, daftar gambar Blue Archive belum tersedia.")
+				return
+			}
+			baLinks = links
+			log.Printf("BA links loaded: %d (url=%v local=%s)", len(baLinks), baURL != "", baLocalPath)
+		}
+		if err := anime.SendRandomImage(context.Background(), client, destJID(to), baLinks); err != nil { // :contentReference[oaicite:6]{index=6}
+			log.Println("BA SendRandomImage error:", err)
+			_ = sendText(client, destJID(to), "Gagal mengirim gambar Blue Archive.")
+		}
+		return
+	}
+
+	// — Apakah user minta VN? (boleh di mana saja) — tetap sama
 	wantVN := false
 	if loc := reAskVoice.FindStringIndex(userText); loc != nil {
 		wantVN = true
@@ -233,7 +269,7 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 		log.Printf("VN detected: cleaned text => %q", userText)
 	}
 
-	// persona + info developer
+	// persona + info developer — tetap sama
 	system := `Perankan "Elaina", penyihir cerdas & hangat.
 Gunakan orang pertama ("aku/ku") & panggil pengguna "kamu".
 JANGAN menulis "Kamu Elaina" atau bicara orang ketiga.
@@ -248,14 +284,14 @@ Catatan: Developer-ku adalah admin tersayang Daun.`
 	}
 
 	log.Printf("askGemini: wantVN=%v | text=%q", wantVN, userText)
-	reply, err := askGemini(system, userText) // <- pakai rotasi API key otomatis
+	reply, err := askGemini(system, userText) // <- tetap: rotasi API key otomatis
 	if err != nil {
 		log.Printf("askGemini error: %v", err)
 		reply = "Ups, Elaina lagi tersandung jaringan. Coba lagi ya ✨"
 	}
 	log.Printf("askGemini: got reply (len=%d)", len(reply))
 
-	// VN → batasi kata + synthesize → kirim audio
+	// VN → batasi kata + synthesize → kirim audio — tetap sama
 	if wantVN {
 		reply = limitWords(reply, vnMaxWords)
 		if elAPIKey == "" {
@@ -293,7 +329,7 @@ Catatan: Developer-ku adalah admin tersayang Daun.`
 		return
 	}
 
-	// default kirim teks
+	// default kirim teks — tetap sama
 	if len(reply) > 3500 { reply = reply[:3500] + "…" }
 	log.Printf("send text: len=%d", len(reply))
 	_ = sendText(client, destJID(to), reply)

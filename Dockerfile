@@ -1,19 +1,39 @@
-# ---------- Stage build ----------
-FROM golang:1.22 AS builder
-WORKDIR /app
-COPY . .
-# Biarkan go mod di-generate otomatis saat build; akan fetch deps dari imports
-RUN CGO_ENABLED=0 go build -o app .
+# ---------- Builder (vulnerabilities di sini tidak ikut ke final) ----------
+FROM golang:1.22-bookworm AS builder
 
-# ---------- Stage runtime ----------
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-WORKDIR /app
-ENV GEMINI_API_KEY=
-ENV BOT_NAME=Elaina
-# Untuk Spaces free: gunakan session lokal; untuk Spaces dengan storage upgrade: /data/session.db
-ENV SESSION_PATH=session.db
-COPY --from=builder /app/app /app/app
+WORKDIR /src
+# Cache deps lebih efektif
+COPY go.mod go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+# Copy seluruh kode
+COPY . .
+
+# Build static binary (CGO off) agar cocok untuk distroless:static
+ENV CGO_ENABLED=0 GOOS=linux GOARCH=amd64
+# Tambah -trimpath & strip untuk lebih kecil
+RUN --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -ldflags="-s -w" -o /out/app ./...
+
+# ---------- Final ----------
+# Distroless static dengan CA certs + user nonroot
+FROM gcr.io/distroless/static-debian12:nonroot
+
+# Direktori data untuk WA sqlite store (session.db)
+WORKDIR /data
+# Buat file dummy agar owner = nonroot
+COPY --chown=nonroot:nonroot --from=builder /dev/null /data/.keep
+
+# Binary ke /bin/app
+COPY --from=builder /out/app /bin/app
+
+# Konfigurasi default (bisa override saat run)
+ENV PORT=7860 \
+    SESSION_PATH=/data/session.db \
+    MODE=MANUAL \
+    TRIGGER=elaina
+
 EXPOSE 7860
-USER nobody
-ENTRYPOINT ["/app/app"]
+USER nonroot:nonroot
+ENTRYPOINT ["/bin/app"]
