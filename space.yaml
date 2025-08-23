@@ -1,0 +1,5 @@
+---
+title: wa-elaina
+sdk: docker
+app_port: 7860
+---

@@ -1,0 +1,32 @@
+# Binaries
+/app
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Go build cache
+*.log
+*.prof
+*.tmp
+*.swp
+.idea/
+.vscode/
+__debug_bin
+
+# Dependency directories (Go Modules handled via go.mod)
+vendor/
+
+# Env & secrets
+.env 
+*.key
+*.pem
+session.db
+
+# Docker
+*.tar
+*.bak
+Dockerfile.old
