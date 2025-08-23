@@ -1,4 +1,3 @@
-
 package main
 
 import (
@@ -13,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/joho/godotenv"
 	"google.golang.org/protobuf/proto"
 
 	"go.mau.fi/whatsmeow"
@@ -20,29 +20,48 @@ import (
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	waLog "go.mau.fi/whatsmeow/util/log"
 
 	_ "modernc.org/sqlite"
 )
 
 var (
-	geminiKey  = os.Getenv("GEMINI_API_KEY")
-	sessionDB  = getenv("SESSION_PATH", "session.db")
-	botName    = getenv("BOT_NAME", "Elaina")
+	geminiKey  string
+	sessionDB  string
+	botName    string
 	httpClient = &http.Client{Timeout: 45 * time.Second}
 )
+
+func init() {
+	// Muat .env kalau ada (abaikan error agar tetap bisa pakai env OS)
+	_ = godotenv.Load()
+
+	geminiKey = os.Getenv("GEMINI_API_KEY")
+	sessionDB = getenv("SESSION_PATH", "session.db")
+	botName = getenv("BOT_NAME", "Elaina")
+}
 
 func main() {
 	if geminiKey == "" {
 		log.Fatal("GEMINI_API_KEY kosong")
 	}
 
-	// Storage sesi (SQLite)
-	container, err := sqlstore.New("sqlite", "file:"+sessionDB+"?_pragma=foreign_keys(1)", nil)
+	// ---------- Storage sesi (SQLite) ----------
+	ctx := context.Background()
+	dsn := "file:" + sessionDB + "?_pragma=foreign_keys(1)"
+	dbLog := waLog.Stdout("Database", "INFO", true)
+
+	container, err := sqlstore.New(ctx, "sqlite", dsn, dbLog)
 	if err != nil {
 		log.Fatal(err)
 	}
-	device := container.GetFirstDevice()
+
+	device, err := container.GetFirstDevice(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
 	if device == nil {
+		// Versi whatsmeow kamu: NewDevice() mengembalikan 1 nilai
 		device = container.NewDevice()
 	}
 
@@ -65,8 +84,7 @@ func main() {
 		for e := range qr {
 			switch e.Event {
 			case "code":
-				// Tampilkan kode untuk di-scan (gunakan QR generator online)
-				log.Println("Scan QR (code):", e.Code)
+				log.Println("Scan QR (code):", e.Code) // copy code -> buat QR -> scan di WhatsApp
 			case "success":
 				log.Println("Login success")
 			case "timeout", "error":
@@ -123,7 +141,6 @@ Jika fakta: akurat & singkat. Jika opini: sebutkan alasan. Hindari SARA/eksplisi
 	if err != nil {
 		reply = "Ups, Elaina lagi tersandung jaringan. Coba lagi ya ✨"
 	}
-
 	if len(reply) > 3500 {
 		reply = reply[:3500] + "…"
 	}
@@ -147,7 +164,6 @@ func extractText(m *events.Message) string {
 }
 
 // ---------- Gemini ----------
-
 func askGemini(systemPrompt, userText string) (string, error) {
 	if geminiKey == "" {
 		return "", fmt.Errorf("GEMINI_API_KEY kosong")

@@ -5,6 +5,7 @@ go 1.24.0
 toolchain go1.24.5
 
 require (
+	github.com/joho/godotenv v1.5.1
 	go.mau.fi/whatsmeow v0.0.0-20250820160106-21f5124c7602
 	google.golang.org/protobuf v1.36.8
 	modernc.org/sqlite v1.38.2
