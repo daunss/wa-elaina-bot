@@ -34,25 +34,6 @@ Asisten WhatsApp berkarakter **Elaina**: ngobrol natural (Gemini), jawab **gamba
 
 ## 🧩 Arsitektur Singkat
 
-```mermaid
-graph TD
-  U[User] -->|Chat/Media| WA[WhatsApp]
-  WA --> C[whatsmeow client]
-  C --> R[Router (handleMessage)]
-  R --> V[Vision (Image QA)]
-  R --> A[VN → Transcribe]
-  R --> T[TikTok (TikWM)]
-  R --> B[Blue Archive]
-  R --> H[Chat AI]
-  V --> G[Gemini 1.5]
-  A --> G
-  H --> G
-  T --> W[TikWM API]
-  S[internal/wa/sender] --> WA
-  R --> S
-  HTTP[HTTP API /send] --> R
-```
-
 * `main.go` — wiring WA client, router pesan, persona, handler Vision/VN, Gemini calls.
 * `internal/wa/` — util pengiriman (text, audio, gambar, dokumen) via whatsmeow.
 * `internal/tiktok/` — handler TikTok (TikWM only): unduh, cek ukuran, kirim media/slide, sertakan link audio.
@@ -174,23 +155,6 @@ Kirim pesan WA ke JID tertentu dari aplikasi eksternal.
 
 > Catatan: hanya **teks** yang didukung pada endpoint ini (sengaja sederhana). Perlu media? Saran: tambah endpoint terpisah atau gunakan bot chat biasa.
 
-## 🔧 Contoh cURL
-
-**Health check**
-
-```bash
-curl -s http://127.0.0.1:${PORT:-7860}/healthz
-```
-
-**Kirim pesan via /send**
-
-```bash
-curl -X POST "http://127.0.0.1:${PORT:-7860}/send" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: ${SEND_API_KEY}" \
-  -d '{ "to": "62XXXXXXXXXX@s.whatsapp.net", "text": "Halo dari API" }'
-```
-
 ---
 
 ## 🐳 Deploy di Pterodactyl
@@ -258,5 +222,3 @@ PR dan issue welcome. Ikuti gaya kode Go standar (gofmt, golangci‑lint jika te
 ## 📄 Lisensi
 
 Tentukan lisensi sesuai preferensi (mis. MIT/Apache‑2.0). Jika private, beri keterangan *All rights reserved*.
-
-[![Go](https://img.shields.io/badge/Go-1.22%2B-00ADD8?logo=go)](#) [![Model: Gemini 1.5](https://img.shields.io/badge/Model-Gemini_1.5_Flash-4A90E2)](#) [![Pterodactyl Ready](https://img.shields.io/badge/Pterodactyl-Ready-6E44FF)](#) [![License](https://img.shields.io/badge/License-MIT-green)](#)
