@@ -29,7 +29,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	// TikTok URL detection + TikWM client (tanpa Vreden)
+	// TikTok URL detection + TikWM client 
 	dl "wa-elaina/downloader"
 
 	// Fitur Blue Archive
