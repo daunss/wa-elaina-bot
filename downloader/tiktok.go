@@ -99,14 +99,14 @@ func callTikwm(client *http.Client, link string) (video, audio string, err error
 	return strings.TrimSpace(data.Data.Play), strings.TrimSpace(data.Data.Music), nil
 }
 
-// ---------- Entry point untuk bot ----------
+// ---------- Entry point (BALAS TEKS LINK) ----------
 func HandleTikTok(client *http.Client, urls []string) (string, error) {
 	if client == nil { client = &http.Client{Timeout: 30 * time.Second} }
 
 	// pilih URL pertama yang valid lalu expand
 	raw := ""
 	for _, u := range urls {
-		if strings.TrimSpace(u) != "" { raw = u; break }
+	 if strings.TrimSpace(u) != "" { raw = u; break }
 	}
 	if raw == "" { return "", errors.New("tidak ada url tiktok valid") }
 
@@ -134,6 +134,38 @@ func HandleTikTok(client *http.Client, urls []string) (string, error) {
 	if audio != "" { b.WriteString("• Audio: " + audio + "\n") }
 	b.WriteString("_Gunakan link sebelum kedaluwarsa._")
 	return b.String(), nil
+}
+
+// ---------- Entry point (MEDIA URL untuk upload ke WA) ----------
+func GetTikTokMedia(client *http.Client, urls []string) (videoURL, audioURL string, err error) {
+	if client == nil { client = &http.Client{Timeout: 30 * time.Second} }
+
+	// pilih URL pertama yang valid lalu expand
+	raw := ""
+	for _, u := range urls {
+		if strings.TrimSpace(u) != "" { raw = u; break }
+	}
+	if raw == "" { return "", "", errors.New("tidak ada url tiktok valid") }
+
+	final := ExpandTikTokURL(client, raw)
+
+	// 1) Coba Vreden dulu
+	video, audio, err := callVreden(client, final)
+	if err != nil || (strings.TrimSpace(video) == "" && strings.TrimSpace(audio) == "") {
+		// 2) Fallback ke TikWM
+		v2, a2, err2 := callTikwm(client, final)
+		if err2 != nil {
+			if err != nil { return "", "", fmt.Errorf("%v; fallback: %v", err, err2) }
+			return "", "", err2
+		}
+		video, audio = v2, a2
+	}
+	video = strings.TrimSpace(video)
+	audio = strings.TrimSpace(audio)
+	if video == "" && audio == "" {
+		return "", "", errors.New("tidak ada URL video/audio pada respons")
+	}
+	return video, audio, nil
 }
 
 func firstNonEmpty(s ...string) string {
