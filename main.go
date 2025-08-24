@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -30,7 +29,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	// Hanya pakai deteksi URL dari package downloader
+	// TikTok URL detection + TikWM client (tanpa Vreden)
 	dl "wa-elaina/downloader"
 
 	// Fitur Blue Archive
@@ -74,10 +73,10 @@ var (
 	rlCap     = mustAtoi(getenv("SEND_RATE_PER_MIN", "10")) // token per menit
 
 	// ====== TikTok size limits (bytes), configurable via ENV ======
-	ttMaxVideo int64 // default: 50 MB
-	ttMaxImage int64 // default: 5 MB
-	ttMaxDoc   int64 // default: 80 MB (fallback kirim sebagai dokumen)
-	ttMaxSlides int  // default: 10 (batasi jumlah slide yang dikirim)
+	ttMaxVideo  int64 // default: 50 MB
+	ttMaxImage  int64 // default: 5 MB
+	ttMaxDoc    int64 // default: 80 MB (fallback kirim sebagai dokumen)
+	ttMaxSlides int   // default: 10 (batasi jumlah slide yang dikirim)
 )
 
 type bucket struct {
@@ -255,9 +254,9 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 		return
 	}
 
-	// — TikTok auto (pakai TikWM saja) —
+	// — TikTok auto (TikWM only) —
 	if urls := dl.DetectTikTokURLs(userText); len(urls) > 0 {
-		videoURL, audioURL, images, err := getTikTokFromTikwm(httpClient, urls)
+		videoURL, audioURL, images, err := dl.GetTikTokFromTikwm(httpClient, urls)
 		if err != nil {
 			log.Println("tikwm:", err)
 			_ = sendText(client, destJID(to), "Maaf, gagal mengambil media TikTok. Coba kirim lagi ya.")
@@ -844,52 +843,4 @@ func askGemini(systemPrompt, userText string) (string, error) {
 		return "", lastErr
 	}
 	return "", fmt.Errorf("gemini: tidak ada respons")
-}
-
-/* =========================
-   TikTok via TikWM (tanpa Vreden)
-   ========================= */
-
-type tikwmResp struct {
-	Data struct {
-		Play   string   `json:"play"`   // mp4 (no-wm)
-		Music  string   `json:"music"`  // mp3 url
-		Images []string `json:"images"` // slide photos (optional)
-		// Type bisa ada, tapi tidak kita andalkan
-	} `json:"data"`
-}
-
-func getTikTokFromTikwm(client *http.Client, urls []string) (videoURL, audioURL string, images []string, err error) {
-	if client == nil { client = &http.Client{Timeout: 30 * time.Second} }
-
-	// ambil URL pertama yang non-blank
-	raw := ""
-	for _, u := range urls {
-		if strings.TrimSpace(u) != "" { raw = u; break }
-	}
-	if raw == "" {
-		return "", "", nil, fmt.Errorf("tidak ada url tiktok valid")
-	}
-
-	api := "https://www.tikwm.com/api/?url=" + url.QueryEscape(strings.TrimSpace(raw))
-	req, _ := http.NewRequest(http.MethodGet, api, nil)
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "wa-elaina-bot/1.0")
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", "", nil, err
-	}
-	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return "", "", nil, fmt.Errorf("tikwm HTTP %d: %s", resp.StatusCode, string(body))
-	}
-	var data tikwmResp
-	if err := json.Unmarshal(body, &data); err != nil {
-		return "", "", nil, err
-	}
-	v := strings.TrimSpace(data.Data.Play)
-	a := strings.TrimSpace(data.Data.Music)
-	imgs := data.Data.Images
-	return v, a, imgs, nil
 }
