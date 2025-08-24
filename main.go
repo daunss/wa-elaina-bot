@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -43,7 +44,8 @@ var (
 
 	// VN detection
 	reAskVoice = regexp.MustCompile(`(?i)\bvn\b|minta\s+suara|pakai\s+suara|voice(?:\s+note)?`)
-	reMention  = regexp.MustCompile(`(?i)\belaina\b`)
+	// NOTE: fuzzy: elaina|ela?ina|eleina|elena|elina
+	reMention = regexp.MustCompile(`(?i)\b(elaina|ela?ina|eleina|elena|elina)\b`)
 
 	// Komponen fitur
 	tiktokH *tiktok.Handler
@@ -146,7 +148,6 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 	// === 1) Image Q&A ===
 	if img := msg.Message.GetImageMessage(); img != nil {
 		go func() {
-			// FIX: tambah context sesuai signature terbaru
 			data, err := client.Download(context.Background(), img)
 			if err != nil {
 				_ = sender.Text(wa.DestJID(to), "Maaf, gagal mengunduh gambar 😔")
@@ -171,10 +172,9 @@ Jika ada pertanyaan pada caption/user, jawab langsung; jika tidak ada, berikan d
 		return
 	}
 
-	// === 2) VN → Text → Auto-reply (only if mention "elaina" OR 1:1) ===
+	// === 2) VN → Text → Auto-reply HANYA jika ada "elaina" (fuzzy) ===
 	if aud := msg.Message.GetAudioMessage(); aud != nil {
 		go func() {
-			// FIX: tambah context sesuai signature terbaru
 			data, err := client.Download(context.Background(), aud)
 			if err != nil {
 				_ = sender.Text(wa.DestJID(to), "Maaf, gagal mengambil voice note 😔")
@@ -182,17 +182,22 @@ Jika ada pertanyaan pada caption/user, jawab langsung; jika tidak ada, berikan d
 			}
 			// Step 1: Transcribe
 			transcribeSystem := `Transkripsikan audio berikut ke teks Bahasa Indonesia yang bersih dan mudah dibaca. Hanya kembalikan teks transkripnya tanpa tambahan apapun.`
-			tx, err := askGeminiTranscribe(transcribeSystem, data, aud.GetMimetype())
+			mime := normalizeAudioMime(aud.GetMimetype())
+			tx, err := askGeminiTranscribe(transcribeSystem, data, mime)
 			if err != nil || strings.TrimSpace(tx) == "" {
 				_ = sender.Text(wa.DestJID(to), "Aku nggak bisa dengar jelas VN-nya. Kirim ulang ya.")
 				return
 			}
-			// Step 2: Tentukan apakah harus jawab
-			shouldReply := !isGroup || reMention.FindStringIndex(tx) != nil
-			if !shouldReply {
-				// Diam bila di grup dan tidak menyebut "elaina"
+
+			// Step 2: WAJIB sebut "elaina" (fuzzy)
+			if !hasElainaMention(tx) {
+				// Optional: kirim transkrip untuk debug bila diaktifkan
+				if strings.EqualFold(getenv("VN_DEBUG_TRANSCRIPT", "false"), "true") {
+					_ = sender.Text(wa.DestJID(to), "📝 Transkrip: "+limitWords(tx, 120)+`\n(sebut "Elaina" agar aku membalas)`)
+				}
 				return
 			}
+
 			// Optional: bersihkan mention agar prompt lebih natural
 			clean := reMention.ReplaceAllString(tx, "")
 			clean = strings.TrimSpace(clean)
@@ -221,7 +226,8 @@ Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.`
 	if cmd, _, ok := parseCommand(userText); ok {
 		switch cmd {
 		case "help":
-			_ = sender.Text(wa.DestJID(to), "Perintah:\n• !help — bantuan\n• Kirim link TikTok: bot kirim video langsung + link audio; slide akan dikirim sebagai gambar.\n• Kirim gambar — aku analisis & jawab.\n• Kirim VN sebut 'Elaina' — aku transkrip & jawab.")
+			_ = sender.Text(wa.DestJID(to),
+				"Perintah:\n• !help — bantuan\n• Kirim link TikTok: bot kirim video + link audio; slide jadi gambar.\n• Kirim gambar — aku analisis & jawab.\n• Kirim VN dan sebut 'Elaina' — aku transkrip & jawab.")
 			return
 		case "ping":
 			_ = sender.Text(wa.DestJID(to), "pong")
@@ -256,7 +262,7 @@ Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.`
 	// Blue Archive
 	if baMgr.MaybeHandle(context.Background(), client, wa.DestJID(to), userText) { return }
 
-	// Apakah user minta VN TTS jawaban?
+	// Apakah user minta VN TTS jawaban (untuk teks)?
 	wantVN := false
 	if loc := reAskVoice.FindStringIndex(userText); loc != nil {
 		wantVN = true
@@ -279,7 +285,8 @@ Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.`
 Gunakan orang pertama ("aku/ku") & panggil pengguna "kamu".
 JANGAN menulis "Kamu Elaina" atau bicara orang ketiga.
 Gaya santai-sopan, playful secukupnya, emoji hemat.
-Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.`
+Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.
+Catatan: Developer-ku adalah admin tersayang Daun.`
 	if wantVN {
 		system += "\nUntuk permintaan VN, jawablah sangat ringkas, mudah diucapkan, dan langsung ke inti."
 	}
@@ -351,6 +358,13 @@ func estimateSecondsFromText(s string) uint32 {
 	if n < 1 { n = 1 }
 	if n > 300 { n = 300 }
 	return uint32(n + 0.5)
+}
+
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
 }
 
 // ---------- ElevenLabs TTS (sudah ada sebelumnya) ----------
@@ -553,4 +567,19 @@ func askGeminiVision(systemPrompt, userPrompt string, image []byte, mime string)
 	}
 	if lastErr != nil { return "", lastErr }
 	return "", fmt.Errorf("gemini: tidak ada respons")
+}
+
+// ---------- Utility (VN) ----------
+
+func normalizeAudioMime(m string) string {
+	// WA sering memberi "audio/ogg; codecs=opus" — Gemini cukup "audio/ogg"
+	m = strings.ToLower(strings.TrimSpace(m))
+	if i := strings.Index(m, ";"); i >= 0 {
+		m = m[:i]
+	}
+	return strings.TrimSpace(m)
+}
+
+func hasElainaMention(s string) bool {
+	return reMention.MatchString(s)
 }
