@@ -11,17 +11,15 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
-	"time"
 	"sync"
 	"sync/atomic"
-	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
-	"google.golang.org/protobuf/proto"
 
 	"go.mau.fi/whatsmeow"
-	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/store/sqlstore"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
@@ -29,20 +27,19 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	// TikTok URL detection + TikWM client 
-	dl "wa-elaina/downloader"
-
-	// Fitur Blue Archive
-	anime "wa-elaina/anime"
+	// internal packages
+	"wa-elaina/internal/ba"
+	"wa-elaina/internal/tiktok"
+	"wa-elaina/internal/wa"
 )
 
 var (
 	// ====== ENV / Runtime ======
-	sessionDB   string
-	botName     string
-	mode        string
-	trigger     string
-	sendAPIKey  string // API key untuk /send
+	sessionDB  string
+	botName    string
+	mode       string
+	trigger    string
+	sendAPIKey string // API key untuk /send
 
 	// Gemini multi-keys
 	geminiKeys  []string
@@ -62,11 +59,6 @@ var (
 	// batas kata khusus VN
 	vnMaxWords int
 
-	// ====== Blue Archive ======
-	baLinks     []string // cache link gambar
-	baURL       string   // BA_LINKS_URL (remote JSON)
-	baLocalPath string   // BA_LINKS_LOCAL (fallback file lokal)
-
 	// ====== Rate limit untuk /send (token bucket per-IP) ======
 	rlMu      sync.Mutex
 	rlBuckets = map[string]*bucket{}
@@ -77,6 +69,15 @@ var (
 	ttMaxImage  int64 // default: 5 MB
 	ttMaxDoc    int64 // default: 80 MB (fallback kirim sebagai dokumen)
 	ttMaxSlides int   // default: 10 (batasi jumlah slide yang dikirim)
+
+	// Blue Archive
+	baURL       string
+	baLocalPath string
+
+	// composed helpers
+	sender  *wa.Sender
+	tiktokH *tiktok.Handler
+	baMgr   *ba.Manager
 )
 
 type bucket struct {
@@ -105,14 +106,14 @@ func init() {
 
 	// ---- Lainnya ----
 	sessionDB = getenv("SESSION_PATH", "session.db")
-	botName   = getenv("BOT_NAME", "Elaina")
-	mode      = strings.ToUpper(getenv("MODE", "MANUAL"))
-	trigger   = strings.ToLower(getenv("TRIGGER", "elaina"))
+	botName = getenv("BOT_NAME", "Elaina")
+	mode = strings.ToUpper(getenv("MODE", "MANUAL"))
+	trigger = strings.ToLower(getenv("TRIGGER", "elaina"))
 
 	// ElevenLabs
-	elAPIKey  = os.Getenv("ELEVENLABS_API_KEY")
+	elAPIKey = os.Getenv("ELEVENLABS_API_KEY")
 	elVoiceID = getenv("ELEVENLABS_VOICE_ID", "iWydkXKoiVtvdn4vLKp9")
-	elMime    = getenv("ELEVENLABS_FORMAT", "audio/ogg;codecs=opus") // disarankan: audio/mpeg untuk kestabilan
+	elMime = getenv("ELEVENLABS_FORMAT", "audio/ogg;codecs=opus") // disarankan: audio/mpeg
 
 	// VN_MAX_WORDS
 	if n, err := strconv.Atoi(getenv("VN_MAX_WORDS", "80")); err == nil && n > 0 {
@@ -122,7 +123,7 @@ func init() {
 	}
 
 	// Blue Archive env
-	baURL       = getenv("BA_LINKS_URL", "")
+	baURL = getenv("BA_LINKS_URL", "")
 	baLocalPath = getenv("BA_LINKS_LOCAL", "anime/bluearchive_links.json")
 
 	// API key untuk /send (opsional tapi disarankan)
@@ -132,9 +133,9 @@ func init() {
 	}
 
 	// TikTok size limits
-	ttMaxVideo  = int64(mustAtoi(getenv("TIKTOK_MAX_VIDEO_MB", "50"))) << 20
-	ttMaxImage  = int64(mustAtoi(getenv("TIKTOK_MAX_IMAGE_MB", "5"))) << 20
-	ttMaxDoc    = int64(mustAtoi(getenv("TIKTOK_MAX_DOC_MB", "80"))) << 20
+	ttMaxVideo = int64(mustAtoi(getenv("TIKTOK_MAX_VIDEO_MB", "50"))) << 20
+	ttMaxImage = int64(mustAtoi(getenv("TIKTOK_MAX_IMAGE_MB", "5"))) << 20
+	ttMaxDoc = int64(mustAtoi(getenv("TIKTOK_MAX_DOC_MB", "80"))) << 20
 	ttMaxSlides = mustAtoi(getenv("TIKTOK_MAX_SLIDES", "10"))
 }
 
@@ -149,6 +150,20 @@ func main() {
 	if device == nil { device = container.NewDevice() }
 
 	client := whatsmeow.NewClient(device, nil)
+
+	// compose helpers
+	sender = wa.NewSender(client)
+	tiktokH = &tiktok.Handler{
+		Client: httpClient,
+		Send:   sender,
+		L: tiktok.Limits{
+			Video:  ttMaxVideo,
+			Image:  ttMaxImage,
+			Doc:    ttMaxDoc,
+			Slides: ttMaxSlides,
+		},
+	}
+	baMgr = ba.New(baURL, baLocalPath)
 
 	client.AddEventHandler(func(ev interface{}) {
 		switch e := ev.(type) {
@@ -174,9 +189,9 @@ func main() {
 		if err := client.Connect(); err != nil { log.Fatal("connect:", err) }
 		for e := range qr {
 			switch e.Event {
-			case "code":    log.Println("Scan QR (code):", e.Code)
+			case "code": log.Println("Scan QR (code):", e.Code)
 			case "success": log.Println("Login success")
-			default:        log.Println("QR event:", e.Event)
+			default: log.Println("QR event:", e.Event)
 			}
 		}
 	} else if err := client.Connect(); err != nil {
@@ -184,29 +199,25 @@ func main() {
 	}
 
 	// ---------- HTTP endpoints ----------
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
+	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("ok")) })
 	http.HandleFunc("/help", func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "Endpoints:\n"+
+		_, _ = io.WriteString(w, "Endpoints:\n"+
 			"GET /healthz -> ok\n"+
 			"GET /help -> bantuan ini\n"+
 			"POST/GET /send?to=62xxxx&text=... (Header: X-API-Key)\n")
 	})
 	http.HandleFunc("/send", func(w http.ResponseWriter, r *http.Request) {
 		// Auth via X-API-Key (opsional tapi direkomendasikan)
-		if sendAPIKey != "" {
-			if r.Header.Get("X-API-Key") != sendAPIKey {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+		if sendAPIKey != "" && r.Header.Get("X-API-Key") != sendAPIKey {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
-
 		// Rate limit per-IP
 		ip := clientIP(r)
 		if !allow(ip) {
 			http.Error(w, "rate limit", http.StatusTooManyRequests)
 			return
 		}
-
 		to := r.URL.Query().Get("to")
 		text := r.URL.Query().Get("text")
 		if to == "" || text == "" {
@@ -218,14 +229,14 @@ func main() {
 			return
 		}
 		j := types.NewJID(to, types.DefaultUserServer)
-		if err := sendText(client, destJID(j), text); err != nil {
+		if err := sender.Text(wa.DestJID(j), text); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		w.Write([]byte("sent"))
+		_, _ = w.Write([]byte("sent"))
 	})
 
-	// ---------- Server listen: PORT dari env (fallback 7860) ----------
+	// ---------- Server listen ----------
 	p := getenv("PORT", "7860")
 	log.Printf("Mode: %s | Trigger: %q | HTTP :%s\n", mode, trigger, p)
 	log.Fatal(http.ListenAndServe(":"+p, nil))
@@ -240,178 +251,49 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 	userText := extractText(msg)
 	if userText == "" { return }
 
-	// ========== Command registry sederhana ==========
-	if cmd, _, ok := parseCommand(userText); ok { // args diabaikan
+	// Commands
+	if cmd, _, ok := parseCommand(userText); ok {
 		switch cmd {
 		case "help":
-			_ = sendText(client, destJID(to), "Perintah:\n• !help — bantuan\n• Kirim link TikTok: bot kirim video langsung + link audio; slide akan dikirim sebagai gambar.")
+			_ = sender.Text(wa.DestJID(to), "Perintah:\n• !help — bantuan\n• Kirim link TikTok: bot kirim video langsung + link audio; slide akan dikirim sebagai gambar.")
 			return
 		case "ping":
-			_ = sendText(client, destJID(to), "pong")
+			_ = sender.Text(wa.DestJID(to), "pong")
+			return
+		default:
+			_ = sender.Text(wa.DestJID(to), "Perintah tidak dikenal. Ketik !help")
 			return
 		}
-		_ = sendText(client, destJID(to), "Perintah tidak dikenal. Ketik !help")
-		return
 	}
 
-	// — TikTok auto (TikWM only) —
-	if urls := dl.DetectTikTokURLs(userText); len(urls) > 0 {
-		videoURL, audioURL, images, err := dl.GetTikTokFromTikwm(httpClient, urls)
-		if err != nil {
-			log.Println("tikwm:", err)
-			_ = sendText(client, destJID(to), "Maaf, gagal mengambil media TikTok. Coba kirim lagi ya.")
-			return
-		}
-		dst := destJID(to)
+	// TikTok
+	if tiktokH.TryHandle(userText, to) { return }
 
-		// === SLIDES ===
-		if len(images) > 0 {
-			total := len(images)
-			if ttMaxSlides > 0 && total > ttMaxSlides {
-				total = ttMaxSlides
-			}
-			for i := 0; i < total; i++ {
-				imgURL := images[i]
-				// coba HEAD untuk cek ukuran
-				size, ctype, _ := headInfo(imgURL)
-				// jika terlalu besar untuk image, tapi masih muat dokumen -> kirim dokumen
-				if size > 0 && ttMaxImage > 0 && size > ttMaxImage && (ttMaxDoc <= 0 || size <= ttMaxDoc) {
-					data, mime, err := downloadBytes(imgURL, ttMaxDoc)
-					if err != nil {
-						log.Printf("download (doc) image slide %d error: %v", i+1, err)
-						continue
-					}
-					if mime == "" { mime = ctype }
-					if mime == "" { mime = "image/jpeg" }
-					caption := fmt.Sprintf("TikTok 🖼️ slide %d/%d (dokumen)", i+1, total)
-					if err := sendDocument(client, dst, data, mime, fmt.Sprintf("slide_%d.jpg", i+1), caption); err != nil {
-						log.Printf("send document slide %d error: %v", i+1, err)
-					}
-					continue
-				}
-				// normal path: kirim sebagai foto
-				data, mime, err := downloadBytes(imgURL, ttMaxImage)
-				if err != nil {
-					log.Printf("download image slide %d error: %v", i+1, err)
-					continue
-				}
-				if mime == "" { mime = "image/jpeg" }
-				caption := fmt.Sprintf("TikTok 🖼️ slide %d/%d", i+1, total)
-				if err := sendImage(client, dst, data, mime, caption); err != nil {
-					log.Printf("send image slide %d error: %v", i+1, err)
-				}
-			}
-			// kirim link audio jika ada
-			if strings.TrimSpace(audioURL) != "" {
-				_ = sendText(client, dst, "🔊 Audio: "+audioURL)
-			}
-			return
-		}
-
-		// === VIDEO ===
-		if strings.TrimSpace(videoURL) != "" {
-			// cek ukuran via HEAD (kalau tersedia)
-			size, ctype, _ := headInfo(videoURL)
-
-			// fallback: kalau > batas video tapi <= batas dokumen, kirim sebagai dokumen
-			if size > 0 && ttMaxVideo > 0 && size > ttMaxVideo && (ttMaxDoc <= 0 || size <= ttMaxDoc) {
-				data, mime, err := downloadBytes(videoURL, ttMaxDoc)
-				if err != nil {
-					log.Printf("download (doc) video error: %v", err)
-				} else {
-					if mime == "" { mime = ctype }
-					if mime == "" { mime = "video/mp4" }
-					if err := sendDocument(client, dst, data, mime, "tiktok.mp4", "TikTok 🎬 (dokumen)"); err == nil {
-						// setelah video terkirim, kirim link audio (bila ada)
-						if strings.TrimSpace(audioURL) != "" {
-							_ = sendText(client, dst, "🔊 Audio: "+audioURL)
-						}
-						return
-					}
-					log.Printf("send document error: %v", err)
-				}
-			}
-
-			// normal path: kirim sebagai video (batas ttMaxVideo)
-			data, mime, err := downloadBytes(videoURL, ttMaxVideo)
-			if err != nil {
-				log.Printf("download video error: %v", err)
-			} else {
-				if mime == "" { mime = "video/mp4" }
-				if err := sendVideo(client, dst, data, mime, "TikTok 🎬"); err == nil {
-					// setelah video terkirim, kirim link audio (bila ada)
-					if strings.TrimSpace(audioURL) != "" {
-						_ = sendText(client, dst, "🔊 Audio: "+audioURL)
-					}
-					return
-				}
-				log.Printf("send video error: %v", err)
-			}
-		}
-
-		// === AUDIO ONLY (jarang, tapi antisipasi) ===
-		if strings.TrimSpace(audioURL) != "" {
-			_ = sendText(client, dst, "🔊 Audio: "+audioURL)
-			return
-		}
-
-		// tidak ada yang bisa dikirim
-		_ = sendText(client, dst, "Maaf, tidak menemukan media valid dari TikTok.")
-		return
-	}
-
-	// — Mode MANUAL (grup) —
+	// Mode MANUAL (grup)
 	if isGroup && mode == "MANUAL" {
 		low := strings.ToLower(userText)
 		if trigger == "" { trigger = "elaina" }
-
 		found := false
-		pos := -1
-
 		if i := strings.Index(low, "@"+trigger); i >= 0 {
 			found = true
-			pos = i
 			userText = strings.TrimSpace(userText[:i] + userText[i+len("@"+trigger):])
 		} else if i := strings.Index(low, trigger); i >= 0 {
 			found = true
-			pos = i
 			userText = strings.TrimSpace(userText[:i] + userText[i+len(trigger):])
 		}
-
-		if !found {
-			log.Printf("manual mode: trigger %q tidak ditemukan, abaikan (text=%q)", trigger, userText)
-			return
-		}
-		log.Printf("manual mode: trigger ditemukan di index %d; setelah hapus trigger => %q", pos, userText)
-
+		if !found { return }
 		if userText == "" { userText = "hai" }
 	}
 
-	// — Blue Archive —
-	if anime.IsBARequest(userText) {
-		if len(baLinks) == 0 {
-			links, err := anime.LoadLinks(context.Background(), baLocalPath, baURL)
-			if err != nil {
-				log.Println("BA LoadLinks error:", err)
-				_ = sendText(client, destJID(to), "Maaf, daftar gambar Blue Archive belum tersedia.")
-				return
-			}
-			baLinks = links
-			log.Printf("BA links loaded: %d (url=%v local=%s)", len(baLinks), baURL != "", baLocalPath)
-		}
-		if err := anime.SendRandomImage(context.Background(), client, destJID(to), baLinks); err != nil {
-			log.Println("BA SendRandomImage error:", err)
-			_ = sendText(client, destJID(to), "Gagal mengirim gambar Blue Archive.")
-		}
-		return
-	}
+	// Blue Archive
+	if baMgr.MaybeHandle(context.Background(), client, wa.DestJID(to), userText) { return }
 
-	// — Apakah user minta VN? —
+	// Apakah user minta VN?
 	wantVN := false
 	if loc := reAskVoice.FindStringIndex(userText); loc != nil {
 		wantVN = true
 		before := strings.TrimSpace(userText[:loc[0]])
-		after  := strings.TrimSpace(userText[loc[1]:])
+		after := strings.TrimSpace(userText[loc[1]:])
 		switch {
 		case before != "" && after != "":
 			userText = strings.TrimSpace(before + " " + after)
@@ -422,10 +304,9 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 		default:
 			userText = ""
 		}
-		log.Printf("VN detected: cleaned text => %q", userText)
 	}
 
-	// persona + info developer
+	// Persona
 	system := `Perankan "Elaina", penyihir cerdas & hangat.
 Gunakan orang pertama ("aku/ku") & panggil pengguna "kamu".
 JANGAN menulis "Kamu Elaina" atau bicara orang ketiga.
@@ -439,288 +320,36 @@ Catatan: Developer-ku adalah admin tersayang Daun.`
 		userText = "Tolong jawab singkat dalam 1–2 kalimat."
 	}
 
-	log.Printf("askGemini: wantVN=%v | text=%q", wantVN, userText)
-	reply, err := askGemini(system, userText) // rotasi API key otomatis
+	// Gemini
+	reply, err := askGemini(system, userText)
 	if err != nil {
-		log.Printf("askGemini error: %v", err)
 		reply = "Ups, Elaina lagi tersandung jaringan. Coba lagi ya ✨"
 	}
-	log.Printf("askGemini: got reply (len=%d)", len(reply))
 
-	// VN → batasi kata + synthesize → kirim audio
+	// VN → TTS
 	if wantVN {
 		reply = limitWords(reply, vnMaxWords)
 		if elAPIKey == "" {
-			_ = sendText(client, destJID(to), "[VN off] "+reply)
+			_ = sender.Text(wa.DestJID(to), "[VN off] "+reply)
 			return
 		}
-		log.Printf("TTS start: len=%d", len(reply))
 		audio, mime, err := elevenTTS(reply, elVoiceID, elMime)
 		if err != nil {
-			log.Printf("tts error: %v", err)
-			_ = sendText(client, destJID(to), reply) // fallback teks
+			_ = sender.Text(wa.DestJID(to), reply) // fallback teks
 			return
 		}
 		dur := estimateSecondsFromText(reply)
-		dst := destJID(to)
-		if err := sendAudio(client, dst, audio, mime, true, dur); err != nil {
-			log.Printf("send audio error: %v", err)
-			// Fallback: coba MP3 jika OGG/Opus bermasalah
-			if !strings.Contains(strings.ToLower(mime), "audio/mpeg") {
-				if a2, m2, e2 := elevenTTS(reply, elVoiceID, "audio/mpeg"); e2 == nil {
-					if e3 := sendAudio(client, dst, a2, m2, true, dur); e3 == nil {
-						log.Printf("send audio fallback MP3: success")
-						return
-					} else {
-						log.Printf("send audio fallback MP3 error: %v", e3)
-					}
-				} else {
-					log.Printf("tts fallback mp3 error: %v", e2)
-				}
-			}
-			_ = sendText(client, dst, reply) // fallback teks terakhir
-		} else {
-			log.Printf("send audio -> %s | mime=%s | dur=%ds", dst, mime, dur)
-		}
+		_ = sender.Audio(wa.DestJID(to), audio, mime, true, dur)
 		return
 	}
 
-	// default kirim teks
+	// default kirim teks (trim panjang)
 	if len(reply) > 3500 { reply = reply[:3500] + "…" }
-	log.Printf("send text: len=%d", len(reply))
-	_ = sendText(client, destJID(to), reply)
+	_ = sender.Text(wa.DestJID(to), reply)
 }
 
-// ---------- Helper tujuan kirim ----------
-func destJID(j types.JID) types.JID {
-	if j.Server == types.GroupServer {
-		return j
-	}
-	return j.ToNonAD()
-}
+// ---------- Helpers ringkas di main ----------
 
-// ---------- Batas kata VN ----------
-func limitWords(s string, max int) string {
-	if max <= 0 {
-		return s
-	}
-	s = strings.TrimSpace(s)
-	parts := strings.Fields(s)
-	if len(parts) <= max {
-		return s
-	}
-	return strings.Join(parts[:max], " ") + "…"
-}
-
-// Perkiraan durasi (detik) agar player WA tidak macet 0:00
-func estimateSecondsFromText(s string) uint32 {
-	n := float64(len(strings.Fields(s))) / 2.5 // ~150 kata/menit
-	if n < 1 { n = 1 }
-	if n > 300 { n = 300 }
-	return uint32(n + 0.5)
-}
-
-// ---------- ElevenLabs TTS ----------
-func elevenTTS(text, voiceID, mime string) ([]byte, string, error) {
-	if mime == "" { mime = "audio/ogg;codecs=opus" }
-	mime = strings.ReplaceAll(mime, " ", "")
-
-	url := "https://api.elevenlabs.io/v1/text-to-speech/" + voiceID
-	reqBody := map[string]any{ "text": text }
-	b, _ := json.Marshal(reqBody)
-
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
-	req.Header.Set("xi-api-key", elAPIKey)
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", mime)
-
-	resp, err := httpClient.Do(req)
-	if err != nil { return nil, "", err }
-	defer resp.Body.Close()
-	data, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode >= 300 {
-		return nil, "", fmt.Errorf("elevenlabs %s: %s", resp.Status, string(data))
-	}
-	return data, mime, nil
-}
-
-// ---------- Kirim pesan ----------
-func sendText(client *whatsmeow.Client, to types.JID, text string) error {
-	_, err := client.SendMessage(context.Background(), to, &waProto.Message{
-		Conversation: proto.String(text),
-	})
-	if err != nil && strings.Contains(err.Error(), "479") {
-		time.Sleep(2 * time.Second)
-		_, err = client.SendMessage(context.Background(), to, &waProto.Message{
-			Conversation: proto.String(text),
-		})
-	}
-	return err
-}
-
-func sendAudio(client *whatsmeow.Client, to types.JID, audio []byte, mime string, ptt bool, seconds uint32) error {
-	up, err := client.Upload(context.Background(), audio, whatsmeow.MediaAudio)
-	if err != nil { return err }
-
-	msg := &waProto.Message{
-		AudioMessage: &waProto.AudioMessage{
-			URL:           proto.String(up.URL),
-			DirectPath:    proto.String(up.DirectPath),
-			MediaKey:      up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256,
-			FileSHA256:    up.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(audio))),
-			Mimetype:      proto.String(mime),
-			PTT:           proto.Bool(ptt),
-			Seconds:       proto.Uint32(seconds),
-		},
-	}
-	_, err = client.SendMessage(context.Background(), to, msg)
-	if err != nil && strings.Contains(err.Error(), "479") {
-		time.Sleep(2 * time.Second)
-		_, err = client.SendMessage(context.Background(), to, msg)
-	}
-	return err
-}
-
-// Kirim video
-func sendVideo(client *whatsmeow.Client, to types.JID, video []byte, mime, caption string) error {
-	up, err := client.Upload(context.Background(), video, whatsmeow.MediaVideo)
-	if err != nil { return err }
-	msg := &waProto.Message{
-		VideoMessage: &waProto.VideoMessage{
-			URL:           proto.String(up.URL),
-			DirectPath:    proto.String(up.DirectPath),
-			MediaKey:      up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256,
-			FileSHA256:    up.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(video))),
-			Mimetype:      proto.String(mime),
-			Caption:       proto.String(strings.TrimSpace(caption)),
-		},
-	}
-	_, err = client.SendMessage(context.Background(), to, msg)
-	if err != nil && strings.Contains(err.Error(), "479") {
-		time.Sleep(2 * time.Second)
-		_, err = client.SendMessage(context.Background(), to, msg)
-	}
-	return err
-}
-
-// Kirim gambar (untuk TikTok slide)
-func sendImage(client *whatsmeow.Client, to types.JID, image []byte, mime, caption string) error {
-	up, err := client.Upload(context.Background(), image, whatsmeow.MediaImage)
-	if err != nil { return err }
-	msg := &waProto.Message{
-		ImageMessage: &waProto.ImageMessage{
-			URL:           proto.String(up.URL),
-			DirectPath:    proto.String(up.DirectPath),
-			MediaKey:      up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256,
-			FileSHA256:    up.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(image))),
-			Mimetype:      proto.String(mime),
-			Caption:       proto.String(strings.TrimSpace(caption)),
-		},
-	}
-	_, err = client.SendMessage(context.Background(), to, msg)
-	if err != nil && strings.Contains(err.Error(), "479") {
-		time.Sleep(2 * time.Second)
-		_, err = client.SendMessage(context.Background(), to, msg)
-	}
-	return err
-}
-
-// Kirim sebagai dokumen (fallback untuk file besar)
-func sendDocument(client *whatsmeow.Client, to types.JID, data []byte, mime, filename, caption string) error {
-	up, err := client.Upload(context.Background(), data, whatsmeow.MediaDocument)
-	if err != nil { return err }
-	if filename == "" { filename = "file" }
-	if mime == "" { mime = "application/octet-stream" }
-
-	msg := &waProto.Message{
-		DocumentMessage: &waProto.DocumentMessage{
-			URL:           proto.String(up.URL),
-			DirectPath:    proto.String(up.DirectPath),
-			MediaKey:      up.MediaKey,
-			FileEncSHA256: up.FileEncSHA256,
-			FileSHA256:    up.FileSHA256,
-			FileLength:    proto.Uint64(uint64(len(data))),
-			Mimetype:      proto.String(mime),
-			Title:         proto.String(filename),
-			FileName:      proto.String(filename),
-			Caption:       proto.String(strings.TrimSpace(caption)),
-		},
-	}
-	_, err = client.SendMessage(context.Background(), to, msg)
-	if err != nil && strings.Contains(err.Error(), "479") {
-		time.Sleep(2 * time.Second)
-		_, err = client.SendMessage(context.Background(), to, msg)
-	}
-	return err
-}
-
-// downloader generic dengan batas ukuran
-func downloadBytes(u string, max int64) ([]byte, string, error) {
-	req, _ := http.NewRequest(http.MethodGet, u, nil)
-	req.Header.Set("User-Agent", "wa-elaina-bot/1.0")
-	resp, err := httpClient.Do(req)
-	if err != nil { return nil, "", err }
-	defer resp.Body.Close()
-
-	ct := strings.TrimSpace(resp.Header.Get("Content-Type"))
-	if max > 0 && resp.ContentLength > 0 && resp.ContentLength > max {
-		return nil, ct, fmt.Errorf("file too large: %d > %d", resp.ContentLength, max)
-	}
-	var reader io.Reader = resp.Body
-	if max > 0 {
-		reader = io.LimitReader(resp.Body, max+1)
-	}
-	data, err := io.ReadAll(reader)
-	if err != nil { return nil, ct, err }
-	if max > 0 && int64(len(data)) > max {
-		return nil, ct, fmt.Errorf("file too large after read: %d > %d", len(data), max)
-	}
-	if resp.StatusCode >= 300 {
-		return nil, ct, fmt.Errorf("http %s", resp.Status)
-	}
-	return data, ct, nil
-}
-
-// HEAD info untuk dapat Content-Length & Content-Type (kalau disediakan server)
-func headInfo(u string) (size int64, ctype string, err error) {
-	req, _ := http.NewRequest(http.MethodHead, u, nil)
-	req.Header.Set("User-Agent", "wa-elaina-bot/1.0")
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return 0, "", err
-	}
-	defer resp.Body.Close()
-
-	cl := resp.Header.Get("Content-Length")
-	if cl != "" {
-		if n, e := strconv.ParseInt(strings.TrimSpace(cl), 10, 64); e == nil && n > 0 {
-			size = n
-		}
-	}
-	ctype = strings.TrimSpace(resp.Header.Get("Content-Type"))
-	return size, ctype, nil
-}
-
-// ========== Command parsing ==========
-func parseCommand(s string) (cmd, args string, ok bool) {
-	trim := strings.TrimSpace(s)
-	if trim == "" { return "", "", false }
-	if !strings.HasPrefix(trim, "!") { return "", "", false }
-	trim = strings.TrimPrefix(trim, "!")
-	parts := strings.Fields(trim)
-	if len(parts) == 0 { return "", "", false }
-	cmd = strings.ToLower(parts[0])
-	args = strings.TrimSpace(strings.TrimPrefix(trim, parts[0]))
-	return cmd, args, true
-}
-
-// ========== Helpers umum ==========
 func extractText(m *events.Message) string {
 	if m.Message.GetConversation() != "" { return m.Message.GetConversation() }
 	if ext := m.Message.GetExtendedTextMessage(); ext != nil && ext.GetText() != "" { return ext.GetText() }
@@ -735,9 +364,67 @@ func mustAtoi(s string) int {
 	return n
 }
 
-func minf(a, b float64) float64 { if a < b { return a }; return b }
+func limitWords(s string, max int) string {
+	if max <= 0 { return s }
+	parts := strings.Fields(strings.TrimSpace(s))
+	if len(parts) <= max { return strings.Join(parts, " ") }
+	return strings.Join(parts[:max], " ") + "…"
+}
 
-// Rate limit: token bucket per menit
+func estimateSecondsFromText(s string) uint32 {
+	n := float64(len(strings.Fields(s))) / 2.5 // ~150 kata/menit
+	if n < 1 { n = 1 }
+	if n > 300 { n = 300 }
+	return uint32(n + 0.5)
+}
+
+// parseCommand: deteksi perintah diawali "!", contoh: "!help", "!ping", "!cmd arg1 arg2"
+func parseCommand(s string) (cmd, args string, ok bool) {
+	trim := strings.TrimSpace(s)
+	if trim == "" || !strings.HasPrefix(trim, "!") {
+		return "", "", false
+	}
+	trim = strings.TrimPrefix(trim, "!")
+	parts := strings.Fields(trim)
+	if len(parts) == 0 {
+		return "", "", false
+	}
+	cmd = strings.ToLower(parts[0])
+	args = strings.TrimSpace(strings.TrimPrefix(trim, parts[0]))
+	return cmd, args, true
+}
+
+// elevenTTS: panggil ElevenLabs → kembalikan audio bytes + MIME
+func elevenTTS(text, voiceID, mime string) ([]byte, string, error) {
+	if mime == "" {
+		mime = "audio/ogg;codecs=opus"
+	}
+	mime = strings.ReplaceAll(mime, " ", "")
+
+	url := "https://api.elevenlabs.io/v1/text-to-speech/" + voiceID
+	reqBody := map[string]any{"text": text}
+	b, _ := json.Marshal(reqBody)
+
+	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(b))
+	req.Header.Set("xi-api-key", elAPIKey)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", mime)
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+
+	data, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return nil, "", fmt.Errorf("elevenlabs %s: %s", resp.Status, string(data))
+	}
+	return data, mime, nil
+}
+
+// --- Rate limiting & HTTP helpers ---
+
 func allow(key string) bool {
 	now := time.Now()
 	rlMu.Lock()
@@ -748,40 +435,38 @@ func allow(key string) bool {
 		b = &bucket{tokens: float64(rlCap), lastRefill: now}
 		rlBuckets[key] = b
 	}
-	// refill
 	elapsed := now.Sub(b.lastRefill).Minutes()
 	if elapsed > 0 {
-		b.tokens = minf(float64(rlCap), b.tokens + elapsed*float64(rlCap))
+		if add := elapsed * float64(rlCap); b.tokens+add > float64(rlCap) {
+			b.tokens = float64(rlCap)
+		} else {
+			b.tokens += add
+		}
 		b.lastRefill = now
 	}
-	if b.tokens < 1 {
-		return false
-	}
+	if b.tokens < 1 { return false }
 	b.tokens -= 1
 	return true
 }
 
 func clientIP(r *http.Request) string {
-	// respect X-Forwarded-For jika ada
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		ip := strings.TrimSpace(parts[0])
-		if ip != "" { return "ip:" + ip }
+		if parts := strings.Split(xff, ","); len(parts) > 0 {
+			if ip := strings.TrimSpace(parts[0]); ip != "" { return "ip:" + ip }
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil { return "ip:" + r.RemoteAddr }
 	return "ip:" + host
 }
 
-// ---------- Helper Gemini: rotasi key & request ----------
-func getGeminiKey() string {
-	return geminiKeys[geminiIndex]
-}
+// ---------- Gemini API ----------
+
+func getGeminiKey() string { return geminiKeys[geminiIndex] }
 
 func rotateGeminiKey() bool {
 	if len(geminiKeys) <= 1 { return false }
 	geminiIndex = (geminiIndex + 1) % len(geminiKeys)
-	log.Printf("Ganti ke Gemini API Key index %d", geminiIndex)
 	return true
 }
 
@@ -796,9 +481,7 @@ func callGemini(key, systemPrompt, userText string) ([]byte, int, error) {
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, 0, err
-	}
+	if err != nil { return nil, 0, err }
 	defer resp.Body.Close()
 	rb, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
@@ -815,32 +498,19 @@ func askGemini(systemPrompt, userText string) (string, error) {
 		if err != nil {
 			lastErr = err
 			if status == 429 || strings.Contains(strings.ToLower(err.Error()), "resource_exhausted") {
-				// rotate & retry
-				if rotateGeminiKey() {
-					continue
-				}
+				if rotateGeminiKey() { continue }
 			}
-			// error non-429: hentikan
 			break
 		}
-		// sukses -> parse & return
 		var out struct {
-			Candidates []struct {
-				Content struct {
-					Parts []struct{ Text string `json:"text"` } `json:"parts"`
-				} `json:"content"`
-			} `json:"candidates"`
+			Candidates []struct{ Content struct{ Parts []struct{ Text string `json:"text"` } `json:"parts"` } `json:"content"` } `json:"candidates"`
 		}
-		if err := json.Unmarshal(rb, &out); err != nil {
-			return "", err
-		}
+		if err := json.Unmarshal(rb, &out); err != nil { return "", err }
 		if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
 			return "Maaf, aku belum punya jawaban. Coba ulangi ya~", nil
 		}
 		return strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text), nil
 	}
-	if lastErr != nil {
-		return "", lastErr
-	}
+	if lastErr != nil { return "", lastErr }
 	return "", fmt.Errorf("gemini: tidak ada respons")
 }
