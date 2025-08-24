@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -42,6 +43,7 @@ var (
 
 	// VN detection
 	reAskVoice = regexp.MustCompile(`(?i)\bvn\b|minta\s+suara|pakai\s+suara|voice(?:\s+note)?`)
+	reMention  = regexp.MustCompile(`(?i)\belaina\b`)
 
 	// Komponen fitur
 	tiktokH *tiktok.Handler
@@ -51,7 +53,7 @@ var (
 	geminiKeys  []string
 	geminiIndex int
 
-	// ElevenLabs
+	// ElevenLabs (tetap untuk fitur VN TTS yang sudah ada)
 	elAPIKey  string
 	elVoiceID string
 	elMime    string
@@ -141,6 +143,77 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 	to := msg.Info.Chat
 	isGroup := to.Server == types.GroupServer
 
+	// === 1) Image Q&A ===
+	if img := msg.Message.GetImageMessage(); img != nil {
+		go func() {
+			// FIX: tambah context sesuai signature terbaru
+			data, err := client.Download(context.Background(), img)
+			if err != nil {
+				_ = sender.Text(wa.DestJID(to), "Maaf, gagal mengunduh gambar 😔")
+				return
+			}
+			caption := strings.TrimSpace(img.GetCaption())
+			visionSystem := `Kamu Elaina — analis visual cerdas & hangat.
+Jawab singkat dalam Bahasa Indonesia, akurat, dan to the point.
+Jika ada pertanyaan pada caption/user, jawab langsung; jika tidak ada, berikan deskripsi ringkas (1–3 kalimat) dan 1 insight bermanfaat.`
+
+			if caption == "" {
+				caption = "Tolong jelaskan gambar ini secara ringkas."
+			}
+			reply, err := askGeminiVision(visionSystem, caption, data, img.GetMimetype())
+			if err != nil || strings.TrimSpace(reply) == "" {
+				_ = sender.Text(wa.DestJID(to), "Aku belum bisa membaca gambar itu sekarang, coba lagi ya ✨")
+				return
+			}
+			if len(reply) > 3500 { reply = reply[:3500] + "…" }
+			_ = sender.Text(wa.DestJID(to), reply)
+		}()
+		return
+	}
+
+	// === 2) VN → Text → Auto-reply (only if mention "elaina" OR 1:1) ===
+	if aud := msg.Message.GetAudioMessage(); aud != nil {
+		go func() {
+			// FIX: tambah context sesuai signature terbaru
+			data, err := client.Download(context.Background(), aud)
+			if err != nil {
+				_ = sender.Text(wa.DestJID(to), "Maaf, gagal mengambil voice note 😔")
+				return
+			}
+			// Step 1: Transcribe
+			transcribeSystem := `Transkripsikan audio berikut ke teks Bahasa Indonesia yang bersih dan mudah dibaca. Hanya kembalikan teks transkripnya tanpa tambahan apapun.`
+			tx, err := askGeminiTranscribe(transcribeSystem, data, aud.GetMimetype())
+			if err != nil || strings.TrimSpace(tx) == "" {
+				_ = sender.Text(wa.DestJID(to), "Aku nggak bisa dengar jelas VN-nya. Kirim ulang ya.")
+				return
+			}
+			// Step 2: Tentukan apakah harus jawab
+			shouldReply := !isGroup || reMention.FindStringIndex(tx) != nil
+			if !shouldReply {
+				// Diam bila di grup dan tidak menyebut "elaina"
+				return
+			}
+			// Optional: bersihkan mention agar prompt lebih natural
+			clean := reMention.ReplaceAllString(tx, "")
+			clean = strings.TrimSpace(clean)
+			if clean == "" { clean = tx }
+
+			// Step 3: Jawab pakai persona Elaina (teks)
+			system := `Perankan "Elaina", penyihir cerdas & hangat.
+Gunakan orang pertama ("aku/ku") & panggil pengguna "kamu".
+Gaya santai-sopan, playful secukupnya, emoji hemat.
+Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.`
+			reply, err := askGemini(system, clean)
+			if err != nil || strings.TrimSpace(reply) == "" {
+				reply = "Ups, Elaina lagi kelelahan mendengar. Coba lagi ya ✨"
+			}
+			if len(reply) > 3500 { reply = reply[:3500] + "…" }
+			_ = sender.Text(wa.DestJID(to), reply)
+		}()
+		return
+	}
+
+	// === 3) Alur teks biasa ===
 	userText := extractText(msg)
 	if userText == "" { return }
 
@@ -148,7 +221,7 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 	if cmd, _, ok := parseCommand(userText); ok {
 		switch cmd {
 		case "help":
-			_ = sender.Text(wa.DestJID(to), "Perintah:\n• !help — bantuan\n• Kirim link TikTok: bot kirim video langsung + link audio; slide akan dikirim sebagai gambar.")
+			_ = sender.Text(wa.DestJID(to), "Perintah:\n• !help — bantuan\n• Kirim link TikTok: bot kirim video langsung + link audio; slide akan dikirim sebagai gambar.\n• Kirim gambar — aku analisis & jawab.\n• Kirim VN sebut 'Elaina' — aku transkrip & jawab.")
 			return
 		case "ping":
 			_ = sender.Text(wa.DestJID(to), "pong")
@@ -183,7 +256,7 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 	// Blue Archive
 	if baMgr.MaybeHandle(context.Background(), client, wa.DestJID(to), userText) { return }
 
-	// Voice Note?
+	// Apakah user minta VN TTS jawaban?
 	wantVN := false
 	if loc := reAskVoice.FindStringIndex(userText); loc != nil {
 		wantVN = true
@@ -206,22 +279,21 @@ func handleMessage(client *whatsmeow.Client, msg *events.Message) {
 Gunakan orang pertama ("aku/ku") & panggil pengguna "kamu".
 JANGAN menulis "Kamu Elaina" atau bicara orang ketiga.
 Gaya santai-sopan, playful secukupnya, emoji hemat.
-Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.
-Catatan: Developer-ku adalah admin tersayang Daun.`
+Fakta akurat; opini beri alasan singkat; hindari SARA/eksplisit/berbahaya.`
 	if wantVN {
 		system += "\nUntuk permintaan VN, jawablah sangat ringkas, mudah diucapkan, dan langsung ke inti."
 	}
-	if userText == "" {
+	if strings.TrimSpace(userText) == "" {
 		userText = "Tolong jawab singkat dalam 1–2 kalimat."
 	}
 
-	// Gemini
+	// Gemini (teks)
 	reply, err := askGemini(system, userText)
 	if err != nil {
 		reply = "Ups, Elaina lagi tersandung jaringan. Coba lagi ya ✨"
 	}
 
-	// VN → TTS
+	// VN → TTS (jawaban)
 	if wantVN {
 		reply = limitWords(reply, cfg.VNMaxWords)
 		if elAPIKey == "" {
@@ -281,7 +353,7 @@ func estimateSecondsFromText(s string) uint32 {
 	return uint32(n + 0.5)
 }
 
-// ---------- ElevenLabs TTS ----------
+// ---------- ElevenLabs TTS (sudah ada sebelumnya) ----------
 
 func elevenTTS(text, voiceID, mime string) ([]byte, string, error) {
 	if mime == "" { mime = "audio/ogg;codecs=opus" }
@@ -307,7 +379,7 @@ func elevenTTS(text, voiceID, mime string) ([]byte, string, error) {
 	return data, mime, nil
 }
 
-// ---------- Gemini API ----------
+// ---------- Gemini API (teks) ----------
 
 func getGeminiKey() string { return geminiKeys[geminiIndex] }
 
@@ -359,6 +431,123 @@ func askGemini(systemPrompt, userText string) (string, error) {
 		if err := json.Unmarshal(rb, &out); err != nil { return "", err }
 		if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
 			return "Maaf, aku belum punya jawaban. Coba ulangi ya~", nil
+		}
+		return strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text), nil
+	}
+	if lastErr != nil { return "", lastErr }
+	return "", fmt.Errorf("gemini: tidak ada respons")
+}
+
+// ---------- Gemini API (multimodal: TRANSCRIBE AUDIO) ----------
+
+func callGeminiTranscribe(key, systemPrompt string, audio []byte, mime string) ([]byte, int, error) {
+	endpoint := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + key
+	b64 := base64.StdEncoding.EncodeToString(audio)
+	body := map[string]any{
+		"system_instruction": map[string]any{"role": "system", "parts": []map[string]string{{"text": systemPrompt}}},
+		"contents": []map[string]any{{
+			"role": "user",
+			"parts": []any{
+				map[string]any{"text": "Audio berikut untuk ditranskrip:"},
+				map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": b64}},
+			},
+		}},
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil { return nil, 0, err }
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return rb, resp.StatusCode, fmt.Errorf("gemini %s: %s", resp.Status, string(rb))
+	}
+	return rb, resp.StatusCode, nil
+}
+
+func askGeminiTranscribe(systemPrompt string, audio []byte, mime string) (string, error) {
+	var lastErr error
+	for i := 0; i < len(geminiKeys); i++ {
+		key := getGeminiKey()
+		rb, status, err := callGeminiTranscribe(key, systemPrompt, audio, mime)
+		if err != nil {
+			lastErr = err
+			if status == 429 || strings.Contains(strings.ToLower(err.Error()), "resource_exhausted") {
+				if rotateGeminiKey() { continue }
+			}
+			break
+		}
+		var out struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct{ Text string `json:"text"` } `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if err := json.Unmarshal(rb, &out); err != nil { return "", err }
+		if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
+			return "", nil
+		}
+		return strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text), nil
+	}
+	if lastErr != nil { return "", lastErr }
+	return "", fmt.Errorf("gemini: tidak ada respons")
+}
+
+// ---------- Gemini API (multimodal: VISION IMAGE QA) ----------
+
+func callGeminiVision(key, systemPrompt, userPrompt string, image []byte, mime string) ([]byte, int, error) {
+	endpoint := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + key
+	b64 := base64.StdEncoding.EncodeToString(image)
+	parts := []any{}
+	if strings.TrimSpace(userPrompt) != "" {
+		parts = append(parts, map[string]any{"text": userPrompt})
+	}
+	parts = append(parts, map[string]any{"inlineData": map[string]any{"mimeType": mime, "data": b64}})
+
+	body := map[string]any{
+		"system_instruction": map[string]any{"role": "system", "parts": []map[string]string{{"text": systemPrompt}}},
+		"contents": []map[string]any{{
+			"role":  "user",
+			"parts": parts,
+		}},
+	}
+	b, _ := json.Marshal(body)
+	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := httpClient.Do(req)
+	if err != nil { return nil, 0, err }
+	defer resp.Body.Close()
+	rb, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode >= 300 {
+		return rb, resp.StatusCode, fmt.Errorf("gemini %s: %s", resp.Status, string(rb))
+	}
+	return rb, resp.StatusCode, nil
+}
+
+func askGeminiVision(systemPrompt, userPrompt string, image []byte, mime string) (string, error) {
+	var lastErr error
+	for i := 0; i < len(geminiKeys); i++ {
+		key := getGeminiKey()
+		rb, status, err := callGeminiVision(key, systemPrompt, userPrompt, image, mime)
+		if err != nil {
+			lastErr = err
+			if status == 429 || strings.Contains(strings.ToLower(err.Error()), "resource_exhausted") {
+				if rotateGeminiKey() { continue }
+			}
+			break
+		}
+		var out struct {
+			Candidates []struct {
+				Content struct {
+					Parts []struct{ Text string `json:"text"` } `json:"parts"`
+				} `json:"content"`
+			} `json:"candidates"`
+		}
+		if err := json.Unmarshal(rb, &out); err != nil { return "", err }
+		if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
+			return "", nil
 		}
 		return strings.TrimSpace(out.Candidates[0].Content.Parts[0].Text), nil
 	}
