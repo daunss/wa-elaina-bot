@@ -7,8 +7,10 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
+	pbf "google.golang.org/protobuf/proto"
 
 	"wa-elaina/internal/config"
 	"wa-elaina/internal/feature/owner"
@@ -44,6 +46,27 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, caption
 	system := "Kamu Elaina — analis visual cerdas & hangat. Jawab ringkas, akurat, Bahasa Indonesia."
 	reply := llm.AskVision(system, prompt, blob, img.GetMimetype())
 	txt, mentions := h.owner.Decorate(isOwner, reply)
-	_ = h.send.TextMention(wa.DestJID(m.Info.Chat), txt, mentions)
+	_ = sendTextMention(client, m.Info.Chat, txt, mentions)
 	return true
+}
+
+func sendTextMention(client *whatsmeow.Client, to types.JID, text string, mentions []types.JID) error {
+	if len(mentions) == 0 {
+		_, err := client.SendMessage(context.Background(), to, &waProto.Message{
+			Conversation: pbf.String(text),
+		})
+		return err
+	}
+	ci := &waProto.ContextInfo{}
+	for _, j := range mentions {
+		ci.MentionedJID = append(ci.MentionedJID, j.String())
+	}
+	msg := &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text:        pbf.String(text),
+			ContextInfo: ci,
+		},
+	}
+	_, err := client.SendMessage(context.Background(), to, msg)
+	return err
 }
