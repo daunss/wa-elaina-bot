@@ -39,7 +39,9 @@ type Router struct {
 
 func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
 	trig := cfg.Trigger
-	if trig == "" { trig = "elaina" }
+	if trig == "" {
+		trig = "elaina"
+	}
 
 	rt := &Router{
 		cfg:    cfg,
@@ -52,13 +54,15 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
 		tiktok: tkwrap.New(cfg, s),
 	}
 	llm.Init(cfg)
-	rt.vis   = vision.New(cfg, s, rt.reTrig, rt.owner)
+	rt.vis = vision.New(cfg, s, rt.reTrig, rt.owner)
 	rt.vnote = vn.New(cfg, s, rt.reTrig, rt.owner)
 	return rt
 }
 
 func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
-	if m.Info.IsFromMe || !r.ready.Load() { return }
+	if m.Info.IsFromMe || !r.ready.Load() {
+		return
+	}
 
 	to := m.Info.Chat
 	txt := extractText(m)
@@ -79,31 +83,45 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		return
 	}
 
-	// BA
-	if r.ba.TryHandleText(context.Background(), client, m, txt) { return }
+	// BA (PERBAIKAN: tambahkan isOwner sebagai argumen ke-5)
+	if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) {
+		return
+	}
 
 	// Hijab
-	if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) { return }
+	if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) {
+		return
+	}
 
 	// Vision
-	if r.vis.TryHandle(client, m, txt, isOwner) { return }
+	if r.vis.TryHandle(client, m, txt, isOwner) {
+		return
+	}
 
 	// VN
-	if r.vnote.TryHandle(client, m, isOwner) { return }
+	if r.vnote.TryHandle(client, m, isOwner) {
+		return
+	}
 
 	// TikTok
-	if r.tiktok.TryHandle(txt, to) { return }
+	if r.tiktok.TryHandle(txt, to) {
+		return
+	}
 
 	// Grup MANUAL perlu trigger
 	isGroup := to.Server == types.GroupServer
 	if isGroup && strings.EqualFold(r.cfg.Mode, "MANUAL") {
 		low := strings.ToLower(txt)
-		if !strings.Contains(low, r.cfg.Trigger) { return }
+		if !strings.Contains(low, r.cfg.Trigger) {
+			return
+		}
 		txt = strings.TrimSpace(strings.ReplaceAll(low, r.cfg.Trigger, ""))
 	}
 
 	// LLM umum
-	if strings.TrimSpace(txt) == "" { return }
+	if strings.TrimSpace(txt) == "" {
+		return
+	}
 	reply := llm.AskTextAsElaina(txt)
 	r.sendWithOwner(client, to, reply, isOwner)
 }
@@ -129,15 +147,24 @@ func (r *Router) sendWithOwner(client *whatsmeow.Client, to types.JID, reply str
 
 // helpers
 func extractText(m *events.Message) string {
-	if m.Message.GetConversation() != "" { return m.Message.GetConversation() }
-	if ext := m.Message.GetExtendedTextMessage(); ext != nil && ext.GetText() != "" { return ext.GetText() }
+	if m.Message.GetConversation() != "" {
+		return m.Message.GetConversation()
+	}
+	if ext := m.Message.GetExtendedTextMessage(); ext != nil && ext.GetText() != "" {
+		return ext.GetText()
+	}
 	return ""
 }
+
 func parseBang(s string) (cmd, args string, ok bool) {
 	t := strings.TrimSpace(s)
-	if t == "" || !strings.HasPrefix(t, "!") { return "", "", false }
+	if t == "" || !strings.HasPrefix(t, "!") {
+		return "", "", false
+	}
 	t = strings.TrimPrefix(t, "!")
 	parts := strings.Fields(t)
-	if len(parts) == 0 { return "", "", false }
+	if len(parts) == 0 {
+		return "", "", false
+	}
 	return strings.ToLower(parts[0]), strings.TrimSpace(strings.TrimPrefix(t, parts[0])), true
 }
