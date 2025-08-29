@@ -16,11 +16,13 @@ import (
 	"wa-elaina/internal/feature/baimg"
 	"wa-elaina/internal/feature/hijabin"
 	"wa-elaina/internal/feature/owner"
+	"wa-elaina/internal/feature/rvo"
+	"wa-elaina/internal/feature/tagall"
 	"wa-elaina/internal/feature/tkwrap"
 	"wa-elaina/internal/feature/vn"
 	"wa-elaina/internal/feature/vision"
 	"wa-elaina/internal/llm"
-	"wa-elaina/internal/wa" // <— FIX: dipakai di signature NewRouter dan handler yang perlu sender
+	"wa-elaina/internal/wa"
 )
 
 type Router struct {
@@ -35,6 +37,8 @@ type Router struct {
 	vis    *vision.Handler
 	vnote  *vn.Handler
 	tiktok *tkwrap.Handler
+	rvo    *rvo.Handler
+	tall   *tagall.Handler
 }
 
 func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
@@ -42,7 +46,6 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
 	if trig == "" {
 		trig = "elaina"
 	}
-
 	rt := &Router{
 		cfg:    cfg,
 		send:   s,
@@ -52,6 +55,8 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
 		ba:     baimg.New(cfg),
 		hijab:  hijabin.New(cfg, s),
 		tiktok: tkwrap.New(cfg, s),
+		rvo:    rvo.New(trig),
+		tall:   tagall.New(trig),
 	}
 	llm.Init(cfg)
 	rt.vis = vision.New(cfg, s, rt.reTrig, rt.owner)
@@ -74,12 +79,22 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		switch cmd {
 		case "help":
 			replyText(context.Background(), client, m,
-				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
+				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
 		case "whoami":
 			replyText(context.Background(), client, m, "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String())
 		default:
-			replyText(context.Background(), client, m, "Perintah tidak dikenal. Ketik !help")
+			// biarkan command lain diproses bawah (mis. rvo/tagall via natural text)
 		}
+		// Tidak return: biarkan rvo/tagall juga bisa hidup via command.
+	}
+
+	// RVO (butuh quoted)
+	if r.rvo.TryHandle(client, m, txt) {
+		return
+	}
+
+	// TagAll — ***PERBAIKAN: signature baru hanya (client, m, text)***
+	if r.tall.TryHandle(client, m, txt) {
 		return
 	}
 
@@ -127,7 +142,7 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	replyTextMention(context.Background(), client, m, txtOut, mentions)
 }
 
-// ---- reply helpers (dipakai untuk command & jawaban umum) ----
+// ---- reply helpers ----
 
 func replyText(ctx context.Context, client *whatsmeow.Client, m *events.Message, msg string) {
 	ci := &waProto.ContextInfo{
