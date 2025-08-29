@@ -15,34 +15,37 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types/events"
+	pbf "google.golang.org/protobuf/proto"
 
 	"wa-elaina/internal/config"
-	"wa-elaina/internal/wa"
+	"wa-elaina/internal/wa" // dipakai di New signature agar konsisten dengan router
 )
 
 type Handler struct {
 	apiURL   string
 	apiKey   string
-	send     *wa.Sender
 	re       *regexp.Regexp
 	client   *http.Client
 	gemKeys  []string
 	keyIndex int
 }
 
-func New(cfg config.Config, s *wa.Sender) *Handler {
+func New(cfg config.Config, _ *wa.Sender) *Handler {
 	url := os.Getenv("HIJABIN_API_URL")
 	key := os.Getenv("HIJABIN_API_KEY")
-	// Gemini keys bisa dari ENV GEMINI_IMG_KEYS (comma-separated) atau dari cfg.GeminiKeys
-	gk := keysFromEnv("GEMINI_IMG_KEYS")
+	// ambil keys untuk Gemini: prefer GEMINI_IMG_KEYS, fallback GEMINI_KEYS, lalu cfg.GeminiKeys
+	gk := keysFromCSV(os.Getenv("GEMINI_IMG_KEYS"))
+	if len(gk) == 0 {
+		gk = keysFromCSV(os.Getenv("GEMINI_KEYS"))
+	}
 	if len(gk) == 0 && len(cfg.GeminiKeys) > 0 {
 		gk = cfg.GeminiKeys
 	}
 	return &Handler{
 		apiURL:  strings.TrimSpace(url),
 		apiKey:  strings.TrimSpace(key),
-		send:    s,
 		re:      regexp.MustCompile(`(?i)\b(hijabin|kerudungi|berhijabkan)\b`),
 		client:  &http.Client{Timeout: 60 * time.Second},
 		gemKeys: gk,
@@ -50,11 +53,12 @@ func New(cfg config.Config, s *wa.Sender) *Handler {
 }
 
 func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text string, _ bool, reTrigger *regexp.Regexp) bool {
-	// Wajib ada kata kunci hijab ATAU trigger (mis. "elaina hijabin")
+	// wajib ada kata kunci hijab atau trigger "elaina hijabin"
 	if !h.re.MatchString(text) && !reTrigger.MatchString(text) {
 		return false
 	}
-	// Ambil gambar dari pesan ini atau quoted
+
+	// ambil gambar dari pesan atau quoted
 	img := m.Message.GetImageMessage()
 	if img == nil {
 		if xt := m.Message.GetExtendedTextMessage(); xt != nil && xt.ContextInfo != nil {
@@ -67,29 +71,56 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text st
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
+
 	blob, err := client.Download(ctx, img)
 	if err != nil {
-		_ = h.send.Text(wa.DestJID(m.Info.Chat), "Gagal mengunduh gambar 😔")
+		replyText(ctx, client, m, "Gagal mengunduh gambar 😔")
 		return true
 	}
 
 	out, mimeType, err := h.hijab(ctx, blob, img.GetMimetype())
 	if err != nil {
 		if h.apiURL == "" {
-			_ = h.send.Text(wa.DestJID(m.Info.Chat), "Gagal hijabin via Gemini. Pastikan GEMINI_IMG_KEYS/GEMINI_KEYS terpasang ya.")
+			replyText(ctx, client, m, "Gagal hijabin via Gemini. Pastikan GEMINI_IMG_KEYS / GEMINI_KEYS terpasang.")
 		} else {
-			_ = h.send.Text(wa.DestJID(m.Info.Chat), "Gagal memproses hijabin. Coba lagi ya ✨")
+			replyText(ctx, client, m, "Gagal memproses hijabin. Coba lagi ya ✨")
 		}
 		return true
 	}
-	_ = h.send.Image(wa.DestJID(m.Info.Chat), out, mimeType, "Done~")
+
+	// upload & kirim sebagai reply
+	up, err := client.Upload(ctx, out, whatsmeow.MediaImage)
+	if err != nil {
+		replyText(ctx, client, m, "Upload gambar hasil gagal.")
+		return true
+	}
+	ci := &waProto.ContextInfo{
+		StanzaID:      pbf.String(m.Info.ID),
+		QuotedMessage: m.Message,
+		Participant:   pbf.String(m.Info.Sender.String()),
+		RemoteJID:     pbf.String(m.Info.Chat.String()),
+	}
+	_, _ = client.SendMessage(ctx, m.Info.Chat, &waProto.Message{
+		ImageMessage: &waProto.ImageMessage{
+			URL:           pbf.String(up.URL),
+			DirectPath:    pbf.String(up.DirectPath),
+			MediaKey:      up.MediaKey,
+			FileEncSHA256: up.FileEncSHA256,
+			FileSHA256:    up.FileSHA256,
+			FileLength:    pbf.Uint64(uint64(len(out))),
+			Mimetype:      pbf.String(mimeType),
+			Caption:       pbf.String("Done~"),
+			ContextInfo:   ci,
+		},
+	})
 	return true
 }
 
-// Jika HIJABIN_API_URL ada -> pakai API generic (kompat lama).
-// Jika kosong -> fallback Gemini image-generation (inline di file ini).
+// --- Core proses hijab ---
+// Jika HIJABIN_API_URL ada -> pakai API itu.
+// Jika tidak -> fallback Gemini 2.x image generation.
 func (h *Handler) hijab(ctx context.Context, img []byte, mimeType string) ([]byte, string, error) {
 	mt := mimeType
 	if mt == "" {
@@ -97,6 +128,7 @@ func (h *Handler) hijab(ctx context.Context, img []byte, mimeType string) ([]byt
 	}
 
 	if h.apiURL != "" {
+		// Mode API eksternal
 		b64 := base64.StdEncoding.EncodeToString(img)
 		payload := map[string]any{
 			"image": "data:" + mt + ";base64," + b64,
@@ -119,7 +151,7 @@ func (h *Handler) hijab(ctx context.Context, img []byte, mimeType string) ([]byt
 			return nil, "", errors.New(string(rb))
 		}
 
-		// Try parse
+		// Terima format dataURL / base64 / raw bytes
 		var out struct {
 			Image string `json:"image"`
 			Mime  string `json:"mime"`
@@ -127,41 +159,34 @@ func (h *Handler) hijab(ctx context.Context, img []byte, mimeType string) ([]byt
 		if json.Unmarshal(rb, &out) == nil && out.Image != "" {
 			data := out.Image
 			if strings.HasPrefix(data, "data:") {
-				comma := strings.Index(data, ",")
-				if comma > 0 {
-					head := data[:comma]
-					if ct, _, err := mime.ParseMediaType(strings.TrimPrefix(head, "data:")); err == nil {
-						mt = ct
+				if dec, newMT, ok := decodeDataURL(data); ok {
+					if out.Mime != "" {
+						newMT = out.Mime
 					}
-					dec, err := base64.StdEncoding.DecodeString(data[comma+1:])
-					if err == nil {
-						return dec, mt, nil
-					}
+					return dec, newMT, nil
 				}
 			}
-			dec, err := base64.StdEncoding.DecodeString(data)
-			if err == nil {
+			if dec, err := base64.StdEncoding.DecodeString(data); err == nil {
 				if out.Mime != "" {
 					mt = out.Mime
 				}
 				return dec, mt, nil
 			}
 		}
-		// fallback: raw bytes
+		// fallback: treat as raw bytes
 		return rb, mt, nil
 	}
 
-	// Fallback: Gemini (inline)
-	prompt := "Ubah gambar agar berhijab syar'i rapi & sopan; jangan ubah identitas wajah; hasil natural."
-	imgOut, err := generateHijabGemini(ctx, h.client, h.gemKeys, &h.keyIndex, mt, img, prompt)
+	// Fallback: Gemini
+	prompt := "Tambahkan hijab/kerudung yang sopan dan natural. Jangan ubah identitas wajah. Hasil realistis."
+	out, err := generateHijabGemini(ctx, h.client, h.gemKeys, &h.keyIndex, mt, img, prompt)
 	if err != nil {
 		return nil, "", err
 	}
-	return imgOut, "image/jpeg", nil
+	return out, "image/jpeg", nil
 }
 
-// ---- Gemini image-generation inline (tanpa paket eksternal) ----
-
+// ---- Gemini 2.x inline ----
 func generateHijabGemini(
 	ctx context.Context,
 	httpClient *http.Client,
@@ -172,11 +197,7 @@ func generateHijabGemini(
 	prompt string,
 ) ([]byte, error) {
 	if len(keys) == 0 {
-		// fallback ke GEMINI_KEYS jika IMG_KEYS kosong
-		keys = keysFromEnv("GEMINI_KEYS")
-		if len(keys) == 0 {
-			return nil, errors.New("no Gemini API keys configured")
-		}
+		return nil, errors.New("no Gemini API keys configured")
 	}
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: 60 * time.Second}
@@ -191,13 +212,11 @@ func generateHijabGemini(
 	}
 
 	var lastErr error
-
 	for attempt := 0; attempt < len(keys); attempt++ {
 		key := keys[*keyIndex]
 
 		for _, model := range models {
 			url := "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + key
-
 			reqBody := map[string]any{
 				"generationConfig": map[string]any{
 					"responseModalities": []string{"TEXT", "IMAGE"},
@@ -245,7 +264,7 @@ func generateHijabGemini(
 				continue
 			}
 
-			// Parse gambar dari parts (inlineData / inline_data)
+			// parse image from parts (inlineData / inline_data)
 			var out struct {
 				Candidates []struct {
 					Content struct {
@@ -283,6 +302,41 @@ func generateHijabGemini(
 	return nil, errors.New("image-gen failed")
 }
 
+// ---- utils ----
+func decodeDataURL(dataURL string) ([]byte, string, bool) {
+	// data:[<mediatype>][;base64],<data>
+	comma := strings.Index(dataURL, ",")
+	if comma <= 0 {
+		return nil, "", false
+	}
+	head, body := dataURL[:comma], dataURL[comma+1:]
+	ct := "application/octet-stream"
+	if mt, _, err := mime.ParseMediaType(strings.TrimPrefix(head, "data:")); err == nil {
+		ct = mt
+	}
+	dec, err := base64.StdEncoding.DecodeString(body)
+	if err != nil {
+		return nil, "", false
+	}
+	return dec, ct, true
+}
+
+func keysFromCSV(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	ps := strings.Split(raw, ",")
+	out := make([]string, 0, len(ps))
+	for _, p := range ps {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 func rotateIndex(idx *int, n int) {
 	if n <= 1 {
 		return
@@ -290,18 +344,17 @@ func rotateIndex(idx *int, n int) {
 	*idx = (*idx + 1) % n
 }
 
-func keysFromEnv(name string) []string {
-	raw := strings.TrimSpace(os.Getenv(name))
-	if raw == "" {
-		return nil
+func replyText(ctx context.Context, client *whatsmeow.Client, m *events.Message, msg string) {
+	ci := &waProto.ContextInfo{
+		StanzaID:      pbf.String(m.Info.ID),
+		QuotedMessage: m.Message,
+		Participant:   pbf.String(m.Info.Sender.String()),
+		RemoteJID:     pbf.String(m.Info.Chat.String()),
 	}
-	parts := strings.Split(raw, ",")
-	out := make([]string, 0, len(parts))
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
+	_, _ = client.SendMessage(ctx, m.Info.Chat, &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text:        pbf.String(msg),
+			ContextInfo: ci,
+		},
+	})
 }

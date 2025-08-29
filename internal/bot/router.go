@@ -20,7 +20,7 @@ import (
 	"wa-elaina/internal/feature/vn"
 	"wa-elaina/internal/feature/vision"
 	"wa-elaina/internal/llm"
-	"wa-elaina/internal/wa"
+	"wa-elaina/internal/wa" // <— FIX: dipakai di signature NewRouter dan handler yang perlu sender
 )
 
 type Router struct {
@@ -69,21 +69,21 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	isOwner := r.owner.IsOwner(m.Info)
 	r.owner.Debug(m.Info, isOwner)
 
-	// Commands
+	// Commands (reply)
 	if cmd, _, ok := parseBang(txt); ok {
 		switch cmd {
 		case "help":
-			r.send.Text(wa.DestJID(to),
-				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• ba / random ba / waifu ba — gambar Blue Archive\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
+			replyText(context.Background(), client, m,
+				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
 		case "whoami":
-			r.send.Text(wa.DestJID(to), "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String())
+			replyText(context.Background(), client, m, "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String())
 		default:
-			r.send.Text(wa.DestJID(to), "Perintah tidak dikenal. Ketik !help")
+			replyText(context.Background(), client, m, "Perintah tidak dikenal. Ketik !help")
 		}
 		return
 	}
 
-	// BA (PERBAIKAN: tambahkan isOwner sebagai argumen ke-5)
+	// BA
 	if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) {
 		return
 	}
@@ -118,34 +118,51 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		txt = strings.TrimSpace(strings.ReplaceAll(low, r.cfg.Trigger, ""))
 	}
 
-	// LLM umum
+	// LLM umum (reply + mention owner bila isOwner)
 	if strings.TrimSpace(txt) == "" {
 		return
 	}
 	reply := llm.AskTextAsElaina(txt)
-	r.sendWithOwner(client, to, reply, isOwner)
+	txtOut, mentions := r.owner.Decorate(isOwner, reply)
+	replyTextMention(context.Background(), client, m, txtOut, mentions)
 }
 
-func (r *Router) sendWithOwner(client *whatsmeow.Client, to types.JID, reply string, isOwner bool) {
-	txt, mentions := r.owner.Decorate(isOwner, reply)
-	if len(mentions) == 0 {
-		_ = r.send.Text(wa.DestJID(to), txt)
-		return
+// ---- reply helpers (dipakai untuk command & jawaban umum) ----
+
+func replyText(ctx context.Context, client *whatsmeow.Client, m *events.Message, msg string) {
+	ci := &waProto.ContextInfo{
+		StanzaID:      pbf.String(m.Info.ID),
+		QuotedMessage: m.Message,
+		Participant:   pbf.String(m.Info.Sender.String()),
+		RemoteJID:     pbf.String(m.Info.Chat.String()),
 	}
-	ci := &waProto.ContextInfo{}
+	_, _ = client.SendMessage(ctx, m.Info.Chat, &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text:        pbf.String(msg),
+			ContextInfo: ci,
+		},
+	})
+}
+
+func replyTextMention(ctx context.Context, client *whatsmeow.Client, m *events.Message, text string, mentions []types.JID) {
+	ci := &waProto.ContextInfo{
+		StanzaID:      pbf.String(m.Info.ID),
+		QuotedMessage: m.Message,
+		Participant:   pbf.String(m.Info.Sender.String()),
+		RemoteJID:     pbf.String(m.Info.Chat.String()),
+	}
 	for _, j := range mentions {
 		ci.MentionedJID = append(ci.MentionedJID, j.String())
 	}
-	msg := &waProto.Message{
+	_, _ = client.SendMessage(ctx, m.Info.Chat, &waProto.Message{
 		ExtendedTextMessage: &waProto.ExtendedTextMessage{
-			Text:        pbf.String(txt),
+			Text:        pbf.String(text),
 			ContextInfo: ci,
 		},
-	}
-	_, _ = client.SendMessage(context.Background(), to, msg)
+	})
 }
 
-// helpers
+// ---- small helpers ----
 func extractText(m *events.Message) string {
 	if m.Message.GetConversation() != "" {
 		return m.Message.GetConversation()

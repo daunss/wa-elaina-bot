@@ -14,34 +14,33 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow"
+	waProto "go.mau.fi/whatsmeow/binary/proto"
 	"go.mau.fi/whatsmeow/types/events"
+	pbf "google.golang.org/protobuf/proto"
 
 	"wa-elaina/internal/config"
-	"wa-elaina/internal/wa"
 )
 
 type Handler struct {
 	index map[string][]string
-	re0   *regexp.Regexp // ^ba$ / ba random
-	re1   *regexp.Regexp // ^ba:\s*(.+)$
-	re2   *regexp.Regexp // (ba|blue\s*archive)\s+(gambar|img|foto)\s+(.+)
+	reBA  *regexp.Regexp // ba / ba random
+	reNat *regexp.Regexp // frasa natural: (kirim|minta).*blue archive
 }
 
 func New(cfg config.Config) *Handler {
 	h := &Handler{
 		index: map[string][]string{},
-		re0:   regexp.MustCompile(`(?i)^(?:ba)(?:\s+(?:random|img|gambar|foto))?\s*$`),
-		re1:   regexp.MustCompile(`(?i)^ba:\s*(.+)$`),
-		re2:   regexp.MustCompile(`(?i)^(?:ba|blue\s*archive)\s+(?:gambar|img|foto)\s+(.+)$`),
+		reBA:  regexp.MustCompile(`(?i)^(?:ba)(?:\s+(?:random|img|gambar|foto))?\s*$`),
+		reNat: regexp.MustCompile(`(?i)\b(kirim|minta|tolong|please).*(blue\s*archive)|\bblue\s*archive\b`),
 	}
 	_ = h.loadIndex(cfg.BALinksLocal, cfg.BALinksURL)
 	return h
 }
 
-// Index format fleksibel:
-// a) {"hoshino":["https://...","..."], "ako":[...]}
-// b) [{"name":"hoshino","urls":["https://..."]}, ...]
-// c) ["https://...","https://..."]                  <-- format lama (array string)
+// Index fleksibel:
+//  a) map[string][]string
+//  b) [{"name":"hoshino","urls":["..."]}]
+//  c) []string                 // format lama: daftar URL polos
 func (h *Handler) loadIndex(local, remote string) error {
 	if local != "" {
 		if err := h.readLocal(local); err == nil {
@@ -76,13 +75,13 @@ func (h *Handler) readRemote(url string) error {
 }
 
 func (h *Handler) parse(b []byte) error {
-	// try map
+	// a) map[name][]urls
 	var m map[string][]string
 	if json.Unmarshal(b, &m) == nil && len(m) > 0 {
 		h.index = normalizeIndex(m)
 		return nil
 	}
-	// try array of {name, urls}
+	// b) array objek
 	var arr []struct {
 		Name string   `json:"name"`
 		URLs []string `json:"urls"`
@@ -99,7 +98,7 @@ func (h *Handler) parse(b []byte) error {
 		h.index = normalizeIndex(out)
 		return nil
 	}
-	// try []string (format lama: daftar URL tanpa nama)
+	// c) flat []string
 	var flat []string
 	if json.Unmarshal(b, &flat) == nil && len(flat) > 0 {
 		h.index = map[string][]string{"__all__": sanitize(flat)}
@@ -137,52 +136,129 @@ func sanitize(in []string) []string {
 func (h *Handler) TryHandleText(ctx context.Context, client *whatsmeow.Client, m *events.Message, text string, _ bool) bool {
 	low := strings.ToLower(strings.TrimSpace(text))
 
-	// 1) "ba" / "ba random"
-	if h.re0.MatchString(low) {
-		urls := h.index["__all__"]
-		if len(urls) == 0 {
-			_, _ = client.SendMessage(ctx, m.Info.Chat, wa.TextMsg("Daftar BA (format lama) belum dimuat. Isi `anime/bluearchive_links.json` sebagai array URL atau set `BA_LINKS_LOCAL`."))
-			return true
-		}
-		dest := wa.DestJID(m.Info.Chat)
-		// kirim maksimal 3 random
-		rand.Seed(time.Now().UnixNano())
-		max := 3
-		if max > len(urls) {
-			max = len(urls)
-		}
-		perm := rand.Perm(len(urls))[:max]
-		for _, i := range perm {
-			_ = wa.SendImageURL(client, dest, urls[i], "Blue Archive 💙")
-		}
-		return true
+	// 1) Perintah pendek
+	if h.reBA.MatchString(low) {
+		return h.sendRandom(ctx, client, m)
 	}
 
-	// 2) "ba: <nama>" atau "ba gambar <nama>"
-	var name string
-	if g := h.re1.FindStringSubmatch(low); len(g) == 2 {
-		name = strings.TrimSpace(g[1])
-	} else if g := h.re2.FindStringSubmatch(low); len(g) == 2 {
-		name = strings.TrimSpace(g[1])
+	// 2) Frasa natural berisi "blue archive"
+	if h.reNat.MatchString(low) || strings.Contains(low, "blue archive") {
+		return h.sendRandom(ctx, client, m)
 	}
+
+	// 3) "ba: <nama>" (opsional — tetap dukung)
+	if strings.HasPrefix(low, "ba:") {
+		name := strings.TrimSpace(strings.TrimPrefix(low, "ba:"))
+		return h.sendByName(ctx, client, m, name)
+	}
+	return false
+}
+
+// ---- helpers kirim ----
+
+func (h *Handler) flattenAll() []string {
+	if all := h.index["__all__"]; len(all) > 0 {
+		return all
+	}
+	// jika tak ada "__all__", gabungkan semua
+	res := make([]string, 0, 64)
+	for _, v := range h.index {
+		res = append(res, v...)
+	}
+	return res
+}
+
+func (h *Handler) sendRandom(ctx context.Context, client *whatsmeow.Client, m *events.Message) bool {
+	urls := h.flattenAll()
+	if len(urls) == 0 {
+		replyText(ctx, client, m, "Index Blue Archive kosong / gagal dimuat.")
+		return true
+	}
+	rand.Seed(time.Now().UnixNano())
+	n := 2
+	if n > len(urls) {
+		n = len(urls)
+	}
+	perm := rand.Perm(len(urls))[:n]
+	for _, i := range perm {
+		_ = sendImageURLReply(ctx, client, m, urls[i], "Blue Archive 💙")
+	}
+	return true
+}
+
+func (h *Handler) sendByName(ctx context.Context, client *whatsmeow.Client, m *events.Message, name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
 	if name == "" {
 		return false
 	}
-
 	urls := h.index[name]
 	if len(urls) == 0 {
-		_, _ = client.SendMessage(ctx, m.Info.Chat, wa.TextMsg("Maaf, karakter itu belum ada di index BA-ku."))
+		replyText(ctx, client, m, "Maaf, karakter itu belum ada di index BA-ku.")
 		return true
 	}
-
-	dest := wa.DestJID(m.Info.Chat)
-	// kirim maksimal 3 gambar berurutan
 	max := 3
 	if len(urls) < max {
 		max = len(urls)
 	}
 	for i := 0; i < max; i++ {
-		_ = wa.SendImageURL(client, dest, urls[i], "BA: "+name)
+		_ = sendImageURLReply(ctx, client, m, urls[i], "BA: "+name)
 	}
 	return true
+}
+
+func replyText(ctx context.Context, client *whatsmeow.Client, m *events.Message, msg string) {
+	ci := &waProto.ContextInfo{
+		StanzaID:       pbf.String(m.Info.ID),
+		QuotedMessage:  m.Message,
+		Participant:    pbf.String(m.Info.Sender.String()),
+		RemoteJID:      pbf.String(m.Info.Chat.String()),
+	}
+	_, _ = client.SendMessage(ctx, m.Info.Chat, &waProto.Message{
+		ExtendedTextMessage: &waProto.ExtendedTextMessage{
+			Text:        pbf.String(msg),
+			ContextInfo: ci,
+		},
+	})
+}
+
+func sendImageURLReply(ctx context.Context, client *whatsmeow.Client, m *events.Message, url, caption string) error {
+	// download
+	httpc := &http.Client{Timeout: 25 * time.Second}
+	resp, err := httpc.Get(url)
+	if err != nil {
+		replyText(ctx, client, m, "Gagal mengunduh gambar BA.")
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		replyText(ctx, client, m, "Gagal mengunduh gambar BA: "+resp.Status)
+		return errors.New("bad status")
+	}
+	b, _ := io.ReadAll(resp.Body)
+	// upload
+	up, err := client.Upload(ctx, b, whatsmeow.MediaImage)
+	if err != nil {
+		replyText(ctx, client, m, "Gagal mengunggah gambar BA.")
+		return err
+	}
+	ci := &waProto.ContextInfo{
+		StanzaID:       pbf.String(m.Info.ID),
+		QuotedMessage:  m.Message,
+		Participant:    pbf.String(m.Info.Sender.String()),
+		RemoteJID:      pbf.String(m.Info.Chat.String()),
+	}
+	_, err = client.SendMessage(ctx, m.Info.Chat, &waProto.Message{
+		ImageMessage: &waProto.ImageMessage{
+			URL:           pbf.String(up.URL),
+			DirectPath:    pbf.String(up.DirectPath),
+			MediaKey:      up.MediaKey,
+			Mimetype:      pbf.String(resp.Header.Get("Content-Type")),
+			FileEncSHA256: up.FileEncSHA256,
+			FileSHA256:    up.FileSHA256,
+			FileLength:    pbf.Uint64(uint64(len(b))),
+			Caption:       pbf.String(caption),
+			ContextInfo:   ci,
+		},
+	})
+	return err
 }
