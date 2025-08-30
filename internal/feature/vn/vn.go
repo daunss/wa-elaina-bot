@@ -2,7 +2,6 @@ package vn
 
 import (
 	"context"
-	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -16,7 +15,7 @@ import (
 	"wa-elaina/internal/config"
 	"wa-elaina/internal/feature/owner"
 	"wa-elaina/internal/llm"
-	"wa-elaina/internal/wa" // <— FIX: dipakai di signature New
+	"wa-elaina/internal/wa"
 )
 
 type Handler struct {
@@ -32,7 +31,27 @@ func New(cfg config.Config, _ *wa.Sender, re *regexp.Regexp, own *owner.Detector
 var reMention = regexp.MustCompile(`(?i)\b(elaina|eleina|elena|elina|ela?ina)\b`)
 
 func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner bool) bool {
+	// Cari audio di pesan ATAU di quoted
 	aud := m.Message.GetAudioMessage()
+	if aud == nil {
+		if xt := m.Message.GetExtendedTextMessage(); xt != nil && xt.ContextInfo != nil {
+			if qm := xt.GetContextInfo().GetQuotedMessage(); qm != nil {
+				aud = qm.GetAudioMessage()
+				// jika audio ada di quoted, pastikan teks pengguna menyebut "elaina"
+				if aud != nil {
+					txt := ""
+					if m.Message.GetConversation() != "" {
+						txt = m.Message.GetConversation()
+					} else if xt := m.Message.GetExtendedTextMessage(); xt != nil {
+						txt = xt.GetText()
+					}
+					if !reMention.MatchString(txt) {
+						return false
+					}
+				}
+			}
+		}
+	}
 	if aud == nil {
 		return false
 	}
@@ -50,12 +69,17 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner
 	}
 
 	// Hanya balas jika ada sebutan “Elaina”
-	if !reMention.MatchString(tx) {
-		if strings.EqualFold(getenv("VN_DEBUG_TRANSCRIPT", "false"), "true") {
-			replyText(ctx, client, m, "📝 Transkrip: "+limit(tx, 120)+`\n(sebut "Elaina" agar aku membalas)`)
-		}
+	userText := ""
+	if m.Message.GetConversation() != "" {
+		userText = m.Message.GetConversation()
+	} else if xt := m.Message.GetExtendedTextMessage(); xt != nil {
+		userText = xt.GetText()
+	}
+	if !reMention.MatchString(userText) && m.Message.GetAudioMessage() == nil {
+		// VN dari quoted tapi user tidak menyebut Elaina → jangan balas
 		return true
 	}
+
 	clean := strings.TrimSpace(reMention.ReplaceAllString(tx, ""))
 	if clean == "" {
 		clean = tx
@@ -66,20 +90,6 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner
 	txt, mentions := h.own.Decorate(isOwner, reply)
 	replyTextMention(ctx, client, m, txt, mentions)
 	return true
-}
-
-func getenv(k, def string) string {
-	if v := os.Getenv(k); v != "" {
-		return v
-	}
-	return def
-}
-func limit(s string, n int) string {
-	w := strings.Fields(s)
-	if len(w) <= n {
-		return s
-	}
-	return strings.Join(w[:n], " ") + "…"
 }
 
 // ---- reply helpers ----

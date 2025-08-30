@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"log"
 	"regexp"
 	"strings"
 	"sync/atomic"
@@ -24,6 +25,9 @@ import (
 	"wa-elaina/internal/llm"
 	"wa-elaina/internal/wa"
 )
+
+// cue kata-kunci yang menandakan "balas yang direply"
+var reReplyCue = regexp.MustCompile(`(?i)\b(balas(in|lah)?|reply|jawab(in|lah)?)(\s+ini)?\b`)
 
 type Router struct {
 	cfg    config.Config
@@ -71,10 +75,33 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 
 	to := m.Info.Chat
 	txt := extractText(m)
+	origTxt := txt // simpan teks ASLI user untuk validasi trigger di MANUAL mode
+
 	isOwner := r.owner.IsOwner(m.Info)
 	r.owner.Debug(m.Info, isOwner)
 
-	// Commands (reply)
+	// ==== DETEKSI REPLY (QUOTED) ====
+	var (
+		quotedImg  = false
+		quotedAud  = false
+		quotedText = ""
+	)
+	if xt := m.Message.GetExtendedTextMessage(); xt != nil && xt.ContextInfo != nil {
+		if qm := xt.GetContextInfo().GetQuotedMessage(); qm != nil {
+			quotedImg = qm.GetImageMessage() != nil
+			quotedAud = qm.GetAudioMessage() != nil
+			if t := qm.GetConversation(); t != "" {
+				quotedText = t
+			} else if et := qm.GetExtendedTextMessage(); et != nil {
+				quotedText = et.GetText()
+			}
+		}
+	}
+	if quotedImg || quotedAud || quotedText != "" {
+		log.Printf("[REPLY] chat=%s quoted{img:%t aud:%t textLen:%d}", m.Info.Chat.String(), quotedImg, quotedAud, len(quotedText))
+	}
+
+	// ==== Commands (reply) ====
 	if cmd, _, ok := parseBang(txt); ok {
 		switch cmd {
 		case "help":
@@ -85,55 +112,71 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		default:
 			// biarkan command lain diproses bawah (mis. rvo/tagall via natural text)
 		}
-		// Tidak return: biarkan rvo/tagall juga bisa hidup via command.
+		// tidak return; rvo/tagall tetap boleh lanjut
 	}
 
-	// RVO (butuh quoted)
+	// ==== RVO (butuh quoted) ====
 	if r.rvo.TryHandle(client, m, txt) {
 		return
 	}
 
-	// TagAll — ***PERBAIKAN: signature baru hanya (client, m, text)***
+	// ==== TagAll ====
 	if r.tall.TryHandle(client, m, txt) {
 		return
 	}
 
-	// BA
+	// ==== BA ====
 	if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) {
 		return
 	}
 
-	// Hijab
+	// ==== HIJABIN (hanya bila ada kata kunci hijab) ====
 	if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) {
 		return
 	}
 
-	// Vision
+	// ==== VISION (analisis gambar) ====
 	if r.vis.TryHandle(client, m, txt, isOwner) {
 		return
 	}
 
-	// VN
+	// ==== VN (transkrip) ====
 	if r.vnote.TryHandle(client, m, isOwner) {
 		return
 	}
 
-	// TikTok
+	// ==== TikTok ====
 	if r.tiktok.TryHandle(txt, to) {
 		return
 	}
 
-	// Grup MANUAL perlu trigger
-	isGroup := to.Server == types.GroupServer
-	if isGroup && strings.EqualFold(r.cfg.Mode, "MANUAL") {
-		low := strings.ToLower(txt)
-		if !strings.Contains(low, r.cfg.Trigger) {
-			return
+	// ==== Reply-to-text: hanya aktif jika user MENYEBUT trigger ====
+	if quotedText != "" && r.reTrig.MatchString(origTxt) {
+		after := strings.TrimSpace(r.reTrig.ReplaceAllString(origTxt, ""))
+		if after == "" || reReplyCue.MatchString(after) {
+			txt = quotedText // balas persis teks yang di-reply
+		} else {
+			txt = after + "\n\nKonteks (pesan yang di-reply): " + quotedText
 		}
-		txt = strings.TrimSpace(strings.ReplaceAll(low, r.cfg.Trigger, ""))
 	}
 
-	// LLM umum (reply + mention owner bila isOwner)
+	// ==== Grup MANUAL: SELALU butuh trigger pada PESAN ASLI USER ====
+	isGroup := to.Server == types.GroupServer
+	if isGroup && strings.EqualFold(r.cfg.Mode, "MANUAL") {
+		if !r.reTrig.MatchString(origTxt) {
+			return // tidak ada trigger → abaikan
+		}
+		// bersihkan trigger dari pesan ASLI; jika kosong & ada quotedText → pakai quotedText
+		clean := strings.TrimSpace(r.reTrig.ReplaceAllString(strings.ToLower(origTxt), ""))
+		if clean == "" && quotedText != "" {
+			txt = quotedText
+		} else if clean != "" && txt == origTxt {
+			// jika belum diubah oleh blok reply-to-text di atas, pakai hasil clean
+			txt = clean
+		}
+	}
+
+	// ==== LLM umum (reply + mention owner bila isOwner) ====
 	if strings.TrimSpace(txt) == "" {
 		return
 	}
@@ -184,6 +227,12 @@ func extractText(m *events.Message) string {
 	}
 	if ext := m.Message.GetExtendedTextMessage(); ext != nil && ext.GetText() != "" {
 		return ext.GetText()
+	}
+	if img := m.Message.GetImageMessage(); img != nil && img.GetCaption() != "" {
+		return img.GetCaption()
+	}
+	if v := m.Message.GetVideoMessage(); v != nil && v.GetCaption() != "" {
+		return v.GetCaption()
 	}
 	return ""
 }

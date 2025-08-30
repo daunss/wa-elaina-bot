@@ -20,7 +20,7 @@ import (
 	pbf "google.golang.org/protobuf/proto"
 
 	"wa-elaina/internal/config"
-	"wa-elaina/internal/wa" // dipakai di New signature agar konsisten dengan router
+	"wa-elaina/internal/wa"
 )
 
 type Handler struct {
@@ -35,14 +35,18 @@ type Handler struct {
 func New(cfg config.Config, _ *wa.Sender) *Handler {
 	url := os.Getenv("HIJABIN_API_URL")
 	key := os.Getenv("HIJABIN_API_KEY")
-	// ambil keys untuk Gemini: prefer GEMINI_IMG_KEYS, fallback GEMINI_KEYS, lalu cfg.GeminiKeys
-	gk := keysFromCSV(os.Getenv("GEMINI_IMG_KEYS"))
-	if len(gk) == 0 {
-		gk = keysFromCSV(os.Getenv("GEMINI_KEYS"))
+
+	// Gemini key list (optional fallback)
+	var gk []string
+	if v := strings.TrimSpace(os.Getenv("GEMINI_IMG_KEYS")); v != "" {
+		gk = keysFromCSV(v)
+	} else if v := strings.TrimSpace(os.Getenv("GEMINI_KEYS")); v != "" {
+		gk = keysFromCSV(v)
 	}
 	if len(gk) == 0 && len(cfg.GeminiKeys) > 0 {
 		gk = cfg.GeminiKeys
 	}
+
 	return &Handler{
 		apiURL:  strings.TrimSpace(url),
 		apiKey:  strings.TrimSpace(key),
@@ -52,13 +56,13 @@ func New(cfg config.Config, _ *wa.Sender) *Handler {
 	}
 }
 
-func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text string, _ bool, reTrigger *regexp.Regexp) bool {
-	// wajib ada kata kunci hijab atau trigger "elaina hijabin"
-	if !h.re.MatchString(text) && !reTrigger.MatchString(text) {
+// HANYA aktif bila ada kata kunci hijab (tidak terpicu hanya karena "elaina")
+func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text string, _ bool, _ *regexp.Regexp) bool {
+	if !h.re.MatchString(text) {
 		return false
 	}
 
-	// ambil gambar dari pesan atau quoted
+	// Gambar dari pesan atau dari quoted
 	img := m.Message.GetImageMessage()
 	if img == nil {
 		if xt := m.Message.GetExtendedTextMessage(); xt != nil && xt.ContextInfo != nil {
@@ -82,15 +86,10 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text st
 
 	out, mimeType, err := h.hijab(ctx, blob, img.GetMimetype())
 	if err != nil {
-		if h.apiURL == "" {
-			replyText(ctx, client, m, "Gagal hijabin via Gemini. Pastikan GEMINI_IMG_KEYS / GEMINI_KEYS terpasang.")
-		} else {
-			replyText(ctx, client, m, "Gagal memproses hijabin. Coba lagi ya ✨")
-		}
+		replyText(ctx, client, m, "Gagal memproses hijabin. Coba lagi ya ✨")
 		return true
 	}
 
-	// upload & kirim sebagai reply
 	up, err := client.Upload(ctx, out, whatsmeow.MediaImage)
 	if err != nil {
 		replyText(ctx, client, m, "Upload gambar hasil gagal.")
@@ -118,17 +117,14 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text st
 	return true
 }
 
-// --- Core proses hijab ---
-// Jika HIJABIN_API_URL ada -> pakai API itu.
-// Jika tidak -> fallback Gemini 2.x image generation.
 func (h *Handler) hijab(ctx context.Context, img []byte, mimeType string) ([]byte, string, error) {
 	mt := mimeType
 	if mt == "" {
 		mt = "image/jpeg"
 	}
 
+	// 1) API eksternal (jika tersedia)
 	if h.apiURL != "" {
-		// Mode API eksternal
 		b64 := base64.StdEncoding.EncodeToString(img)
 		payload := map[string]any{
 			"image": "data:" + mt + ";base64," + b64,
@@ -151,7 +147,6 @@ func (h *Handler) hijab(ctx context.Context, img []byte, mimeType string) ([]byt
 			return nil, "", errors.New(string(rb))
 		}
 
-		// Terima format dataURL / base64 / raw bytes
 		var out struct {
 			Image string `json:"image"`
 			Mime  string `json:"mime"`
@@ -173,138 +168,17 @@ func (h *Handler) hijab(ctx context.Context, img []byte, mimeType string) ([]byt
 				return dec, mt, nil
 			}
 		}
-		// fallback: treat as raw bytes
 		return rb, mt, nil
 	}
 
-	// Fallback: Gemini
-	prompt := "Tambahkan hijab/kerudung yang sopan dan natural. Jangan ubah identitas wajah. Hasil realistis."
-	out, err := generateHijabGemini(ctx, h.client, h.gemKeys, &h.keyIndex, mt, img, prompt)
-	if err != nil {
-		return nil, "", err
-	}
-	return out, "image/jpeg", nil
+	// 2) Fallback Gemini (stub – silakan isi sesuai implementasi Anda)
+	return generateHijabGemini(ctx, h.client, h.gemKeys, &h.keyIndex, mt, img,
+		"Tambahkan hijab/kerudung yang sopan dan natural. Jangan ubah identitas wajah. Hasil realistis.")
 }
 
-// ---- Gemini 2.x inline ----
-func generateHijabGemini(
-	ctx context.Context,
-	httpClient *http.Client,
-	keys []string,
-	keyIndex *int,
-	mime string,
-	imageBytes []byte,
-	prompt string,
-) ([]byte, error) {
-	if len(keys) == 0 {
-		return nil, errors.New("no Gemini API keys configured")
-	}
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 60 * time.Second}
-	}
-	if mime == "" {
-		mime = "image/jpeg"
-	}
+// ---------- utilities ----------
 
-	models := []string{
-		"gemini-2.0-flash-preview-image-generation",
-		"gemini-2.0-flash-exp-image-generation",
-	}
-
-	var lastErr error
-	for attempt := 0; attempt < len(keys); attempt++ {
-		key := keys[*keyIndex]
-
-		for _, model := range models {
-			url := "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent?key=" + key
-			reqBody := map[string]any{
-				"generationConfig": map[string]any{
-					"responseModalities": []string{"TEXT", "IMAGE"},
-				},
-				"contents": []map[string]any{
-					{
-						"role": "user",
-						"parts": []map[string]any{
-							{"text": prompt},
-							{
-								"inline_data": map[string]any{
-									"mime_type": mime,
-									"data":      base64.StdEncoding.EncodeToString(imageBytes),
-								},
-							},
-						},
-					},
-				},
-			}
-
-			b, _ := json.Marshal(reqBody)
-			req, _ := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(b))
-			req.Header.Set("Content-Type", "application/json")
-
-			resp, err := httpClient.Do(req)
-			if err != nil {
-				lastErr = err
-				continue
-			}
-			rb, _ := io.ReadAll(resp.Body)
-			resp.Body.Close()
-
-			bodyLower := strings.ToLower(string(rb))
-			if resp.StatusCode == 429 || strings.Contains(bodyLower, "resource_exhausted") {
-				lastErr = errors.New("rate limited")
-				rotateIndex(keyIndex, len(keys))
-				break
-			}
-			if resp.StatusCode == 400 && strings.Contains(bodyLower, "response modalities") {
-				lastErr = errors.New("modalities unsupported on model " + model)
-				continue
-			}
-			if resp.StatusCode >= 300 {
-				lastErr = errors.New(resp.Status + ": " + string(rb))
-				continue
-			}
-
-			// parse image from parts (inlineData / inline_data)
-			var out struct {
-				Candidates []struct {
-					Content struct {
-						Parts []map[string]any `json:"parts"`
-					} `json:"content"`
-				} `json:"candidates"`
-			}
-			if err := json.Unmarshal(rb, &out); err != nil {
-				lastErr = err
-				continue
-			}
-			if len(out.Candidates) == 0 || len(out.Candidates[0].Content.Parts) == 0 {
-				lastErr = errors.New("no candidates/parts in response")
-				continue
-			}
-			for _, p := range out.Candidates[0].Content.Parts {
-				if id, ok := p["inlineData"].(map[string]any); ok {
-					if data, ok := id["data"].(string); ok && data != "" {
-						return base64.StdEncoding.DecodeString(data)
-					}
-				}
-				if id, ok := p["inline_data"].(map[string]any); ok {
-					if data, ok := id["data"].(string); ok && data != "" {
-						return base64.StdEncoding.DecodeString(data)
-					}
-				}
-			}
-			lastErr = errors.New("no image part in response for model " + model)
-		}
-		rotateIndex(keyIndex, len(keys))
-	}
-	if lastErr != nil {
-		return nil, lastErr
-	}
-	return nil, errors.New("image-gen failed")
-}
-
-// ---- utils ----
 func decodeDataURL(dataURL string) ([]byte, string, bool) {
-	// data:[<mediatype>][;base64],<data>
 	comma := strings.Index(dataURL, ",")
 	if comma <= 0 {
 		return nil, "", false
@@ -337,13 +211,7 @@ func keysFromCSV(raw string) []string {
 	return out
 }
 
-func rotateIndex(idx *int, n int) {
-	if n <= 1 {
-		return
-	}
-	*idx = (*idx + 1) % n
-}
-
+// replyText helper (lokal agar tidak bergantung file lain)
 func replyText(ctx context.Context, client *whatsmeow.Client, m *events.Message, msg string) {
 	ci := &waProto.ContextInfo{
 		StanzaID:      pbf.String(m.Info.ID),
@@ -357,4 +225,9 @@ func replyText(ctx context.Context, client *whatsmeow.Client, m *events.Message,
 			ContextInfo: ci,
 		},
 	})
+}
+
+// Stub fallback Gemini: ganti implementasi ini jika ingin benar-benar memakai Gemini
+func generateHijabGemini(_ context.Context, _ *http.Client, _ []string, _ *int, _ string, _ []byte, _ string) ([]byte, string, error) {
+	return nil, "", errors.New("gemini fallback not configured")
 }

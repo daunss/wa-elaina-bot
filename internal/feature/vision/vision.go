@@ -8,14 +8,14 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	waProto "go.mau.fi/whatsmeow/binary/proto"
-	"go.mau.fi/whatsmeow/types"           // <— FIX: needed for []types.JID
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	pbf "google.golang.org/protobuf/proto"
 
 	"wa-elaina/internal/config"
 	"wa-elaina/internal/feature/owner"
 	"wa-elaina/internal/llm"
-	"wa-elaina/internal/wa"               // <— FIX: used in New signature
+	"wa-elaina/internal/wa"
 )
 
 type Handler struct {
@@ -29,10 +29,19 @@ func New(cfg config.Config, _ *wa.Sender, re *regexp.Regexp, own *owner.Detector
 }
 
 func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, caption string, isOwner bool) bool {
+	// Ambil gambar dari pesan ATAU quoted
 	img := m.Message.GetImageMessage()
+	if img == nil {
+		if xt := m.Message.GetExtendedTextMessage(); xt != nil && xt.ContextInfo != nil {
+			if qm := xt.GetContextInfo().GetQuotedMessage(); qm != nil {
+				img = qm.GetImageMessage()
+			}
+		}
+	}
 	if img == nil {
 		return false
 	}
+	// Wajib ada trigger "elaina" di caption/teks pengguna
 	if !h.reTrig.MatchString(caption) {
 		return false
 	}
