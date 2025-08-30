@@ -20,6 +20,7 @@ import (
 	"wa-elaina/internal/feature/rvo"
 	"wa-elaina/internal/feature/tagall"
 	"wa-elaina/internal/feature/tkwrap"
+	"wa-elaina/internal/feature/tts"     // ← NEW
 	"wa-elaina/internal/feature/vn"
 	"wa-elaina/internal/feature/vision"
 	"wa-elaina/internal/llm"
@@ -40,6 +41,7 @@ type Router struct {
 	hijab  *hijabin.Handler
 	vis    *vision.Handler
 	vnote  *vn.Handler
+	tts    *tts.Handler      // ← NEW
 	tiktok *tkwrap.Handler
 	rvo    *rvo.Handler
 	tall   *tagall.Handler
@@ -65,6 +67,7 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
 	llm.Init(cfg)
 	rt.vis = vision.New(cfg, s, rt.reTrig, rt.owner)
 	rt.vnote = vn.New(cfg, s, rt.reTrig, rt.owner)
+	rt.tts = tts.New(cfg, rt.reTrig) // ← NEW
 	return rt
 }
 
@@ -106,49 +109,21 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		switch cmd {
 		case "help":
 			replyText(context.Background(), client, m,
-				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
+				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• elaina vn <teks> — kirim voice note\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
 		case "whoami":
 			replyText(context.Background(), client, m, "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String())
-		default:
-			// biarkan command lain diproses bawah (mis. rvo/tagall via natural text)
 		}
-		// tidak return; rvo/tagall tetap boleh lanjut
 	}
 
-	// ==== RVO (butuh quoted) ====
-	if r.rvo.TryHandle(client, m, txt) {
-		return
-	}
-
-	// ==== TagAll ====
-	if r.tall.TryHandle(client, m, txt) {
-		return
-	}
-
-	// ==== BA ====
-	if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) {
-		return
-	}
-
-	// ==== HIJABIN (hanya bila ada kata kunci hijab) ====
-	if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) {
-		return
-	}
-
-	// ==== VISION (analisis gambar) ====
-	if r.vis.TryHandle(client, m, txt, isOwner) {
-		return
-	}
-
-	// ==== VN (transkrip) ====
-	if r.vnote.TryHandle(client, m, isOwner) {
-		return
-	}
-
-	// ==== TikTok ====
-	if r.tiktok.TryHandle(txt, to) {
-		return
-	}
+	// ==== Fitur khusus ====
+	if r.rvo.TryHandle(client, m, txt) { return }
+	if r.tall.TryHandle(client, m, txt) { return }
+	if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) { return }
+	if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) { return }
+	if r.vis.TryHandle(client, m, txt, isOwner) { return }
+	if r.vnote.TryHandle(client, m, isOwner) { return }
+	if r.tts.TryHandle(client, m, txt) { return } // ← NEW
+	if r.tiktok.TryHandle(txt, to) { return }
 
 	// ==== Reply-to-text: hanya aktif jika user MENYEBUT trigger ====
 	if quotedText != "" && r.reTrig.MatchString(origTxt) {
@@ -163,23 +138,17 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	// ==== Grup MANUAL: SELALU butuh trigger pada PESAN ASLI USER ====
 	isGroup := to.Server == types.GroupServer
 	if isGroup && strings.EqualFold(r.cfg.Mode, "MANUAL") {
-		if !r.reTrig.MatchString(origTxt) {
-			return // tidak ada trigger → abaikan
-		}
-		// bersihkan trigger dari pesan ASLI; jika kosong & ada quotedText → pakai quotedText
+		if !r.reTrig.MatchString(origTxt) { return }
 		clean := strings.TrimSpace(r.reTrig.ReplaceAllString(strings.ToLower(origTxt), ""))
 		if clean == "" && quotedText != "" {
 			txt = quotedText
 		} else if clean != "" && txt == origTxt {
-			// jika belum diubah oleh blok reply-to-text di atas, pakai hasil clean
 			txt = clean
 		}
 	}
 
 	// ==== LLM umum (reply + mention owner bila isOwner) ====
-	if strings.TrimSpace(txt) == "" {
-		return
-	}
+	if strings.TrimSpace(txt) == "" { return }
 	reply := llm.AskTextAsElaina(txt)
 	txtOut, mentions := r.owner.Decorate(isOwner, reply)
 	replyTextMention(context.Background(), client, m, txtOut, mentions)

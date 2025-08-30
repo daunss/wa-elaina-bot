@@ -29,16 +29,19 @@ func New(cfg config.Config, _ *wa.Sender, re *regexp.Regexp, own *owner.Detector
 }
 
 var reMention = regexp.MustCompile(`(?i)\b(elaina|eleina|elena|elina|ela?ina)\b`)
+var reAskVN = regexp.MustCompile(`(?i)\b(vn|voice\s*note|pesan\s*suara)\b`)
 
 func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner bool) bool {
-	// Cari audio di pesan ATAU di quoted
+	// 1) Audio di pesan?
 	aud := m.Message.GetAudioMessage()
+
+	// 2) Jika tidak ada, coba di quoted (dan wajib ada “elaina”)
 	if aud == nil {
 		if xt := m.Message.GetExtendedTextMessage(); xt != nil && xt.ContextInfo != nil {
 			if qm := xt.GetContextInfo().GetQuotedMessage(); qm != nil {
 				aud = qm.GetAudioMessage()
-				// jika audio ada di quoted, pastikan teks pengguna menyebut "elaina"
 				if aud != nil {
+					// pastikan user menyebut Elaina
 					txt := ""
 					if m.Message.GetConversation() != "" {
 						txt = m.Message.GetConversation()
@@ -52,10 +55,22 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner
 			}
 		}
 	}
+
+	// 3) Tidak ada VN sama sekali → kalau user minta VN, beri arahan
 	if aud == nil {
+		txt := ""
+		if m.Message.GetConversation() != "" {
+			txt = m.Message.GetConversation()
+		} else if xt := m.Message.GetExtendedTextMessage(); xt != nil {
+			txt = xt.GetText()
+		}
+		if reMention.MatchString(txt) && reAskVN.MatchString(txt) {
+			replyText(context.Background(), client, m, "Kirim/Reply **voice note**-nya ya, nanti Elaina transkrip dan jawab ✨")
+		}
 		return false
 	}
 
+	// 4) Download & transkrip
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	blob, err := client.Download(ctx, aud)
@@ -68,7 +83,7 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner
 		return true
 	}
 
-	// Hanya balas jika ada sebutan “Elaina”
+	// 5) Hanya balas jika ada sebutan “Elaina”
 	userText := ""
 	if m.Message.GetConversation() != "" {
 		userText = m.Message.GetConversation()
@@ -76,7 +91,6 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner
 		userText = xt.GetText()
 	}
 	if !reMention.MatchString(userText) && m.Message.GetAudioMessage() == nil {
-		// VN dari quoted tapi user tidak menyebut Elaina → jangan balas
 		return true
 	}
 
@@ -87,8 +101,8 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, isOwner
 	system := `Perankan "Elaina", penyihir cerdas & hangat. Bahasa Indonesia, ringkas, ramah.`
 	reply := llm.AskText(system, clean)
 
-	txt, mentions := h.own.Decorate(isOwner, reply)
-	replyTextMention(ctx, client, m, txt, mentions)
+	txtOut, mentions := h.own.Decorate(isOwner, reply)
+	replyTextMention(ctx, client, m, txtOut, mentions)
 	return true
 }
 
