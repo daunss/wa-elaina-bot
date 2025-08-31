@@ -61,7 +61,7 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
 		ba:     baimg.New(cfg),
 		hijab:  hijabin.New(cfg, s),
 		tiktok: tkwrap.New(cfg, s),
-		rvo:    rvo.New(trig),
+		rvo:    rvo.New(),
 		tall:   tagall.New(trig),
 	}
 	llm.Init(cfg)
