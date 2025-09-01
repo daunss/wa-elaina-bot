@@ -109,16 +109,25 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		switch cmd {
 		case "help":
 			replyText(context.Background(), client, m,
-				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• elaina vn <teks> — kirim voice note\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
+				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall / elaina tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• elaina vn <teks> — kirim voice note\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM")
 		case "whoami":
 			replyText(context.Background(), client, m, "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String())
 		}
 	}
 
 	// ----------- GATE & kebijakan trigger ----------
-	_, _, isCmd := parseBang(origTxt)
+	cmd, _, isCmd := parseBang(origTxt)
 	isGroup := to.Server == types.GroupServer
 	hasTrig := r.reTrig.MatchString(origTxt)
+	isTagAllCmd := isCmd && strings.EqualFold(cmd, "tagall")
+
+	// === NEW: Early guard untuk semua pesan yang merupakan REPLY ===
+	// Jika pesan adalah "reply" ke pesan lain DAN TIDAK mengandung trigger,
+	// DAN bukan command (!...), maka JANGAN proses apa pun (diam).
+	hasQuoted := quotedImg || quotedAud || quotedText != ""
+	if hasQuoted && !hasTrig && !isCmd {
+		return
+	}
 
 	// Khusus pesan gambar/video: di GRUP wajib ada trigger di CAPTION (atau command)
 	hasImage := m.Message.ImageMessage != nil
@@ -129,8 +138,6 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	}
 
 	// ====== Perbaikan deteksi TIKTOK (gabungkan field yang tersedia) ======
-	// Di beberapa build whatsmeow, CanonicalURL tidak tersedia.
-	// Pakai MatchedText + Text saja (dua-duanya cukup untuk mendeteksi URL).
 	tiktokText := origTxt
 	hasTrigTikTok := hasTrig
 	if ext := m.Message.GetExtendedTextMessage(); ext != nil {
@@ -146,15 +153,15 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	}
 
 	// ====== Fitur PRIORITAS (langsung ke script, bukan LLM) ======
-	// RVO / TAGALL / TIKTOK: di PRIVATE bebas, di GRUP wajib ada trigger.
-	allowRvoTagall := !isGroup || hasTrig
+	// RVO & TAGALL: di PRIVATE bebas; di GRUP wajib trigger KECUALI jika command "!tagall".
+	allowRvoTagall := !isGroup || hasTrig || isTagAllCmd
 	if allowRvoTagall {
 		if r.rvo.TryHandle(client, m, txt) { return }
 		if r.tall.TryHandle(client, m, txt) { return }
 	}
+	// TIKTOK: di PRIVATE bebas, di GRUP wajib trigger (menghindari auto-download tak sengaja)
 	allowTikTok := !isGroup || hasTrigTikTok
 	if allowTikTok {
-		// panggil handler dengan string gabungan agar regex bisa menemukan URL
 		if r.tiktok.TryHandle(tiktokText, to) { return }
 	}
 
@@ -182,7 +189,9 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 
 	// ==== Grup MANUAL: SELALU butuh trigger pada PESAN ASLI USER ====
 	if isGroup && strings.EqualFold(r.cfg.Mode, "MANUAL") {
-		if !r.reTrig.MatchString(origTxt) { return }
+		if !r.reTrig.MatchString(origTxt) && !isTagAllCmd {
+			return
+		}
 		clean := strings.TrimSpace(r.reTrig.ReplaceAllString(strings.ToLower(origTxt), ""))
 		if clean == "" && quotedText != "" {
 			txt = quotedText

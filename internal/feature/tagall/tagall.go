@@ -2,7 +2,6 @@ package tagall
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 	"strings"
 
@@ -14,78 +13,83 @@ import (
 )
 
 type Handler struct {
-	re *regexp.Regexp
+	re   *regexp.Regexp // mendeteksi kata "tagall"
+	trig string
 }
 
 func New(trigger string) *Handler {
-	if trigger == "" {
-		trigger = "elaina"
-	}
 	return &Handler{
-		re: regexp.MustCompile(`(?i)^(?:!tagall|` + regexp.QuoteMeta(trigger) + `\s+tagall)\b`),
+		re:   regexp.MustCompile(`(?i)\btagall\b`),
+		trig: trigger,
 	}
 }
 
+// TryHandle: aktif jika di GRUP dan user mengetik:
+// - "!tagall", atau
+// - "elaina tagall" (atau ada kata "tagall" + trigger ditangani oleh router)
 func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text string) bool {
-	if !h.re.MatchString(text) {
+	// Hanya relevan di grup
+	if m.Info.Chat.Server != types.GroupServer {
 		return false
 	}
-	chat := m.Info.Chat
-	if chat.Server != types.GroupServer {
-		replyText(context.Background(), client, chat, m, "Perintah ini hanya untuk grup.")
-		return true
-	}
 
-	ginfo, err := client.GetGroupInfo(chat)
-	if err != nil || ginfo == nil || len(ginfo.Participants) == 0 {
-		replyText(context.Background(), client, chat, m, "Gagal mengambil daftar anggota grup.")
-		return true
-	}
-
-	mentions := make([]string, 0, len(ginfo.Participants))
-	jids := make([]types.JID, 0, len(ginfo.Participants))
-	for _, p := range ginfo.Participants {
-		if p.JID.User == client.Store.ID.User {
-			continue
+	t := strings.TrimSpace(text)
+	isCmd := strings.HasPrefix(t, "!")
+	isBangTagAll := false
+	if isCmd {
+		parts := strings.Fields(strings.TrimPrefix(t, "!"))
+		if len(parts) > 0 && strings.EqualFold(parts[0], "tagall") {
+			isBangTagAll = true
 		}
-		mentions = append(mentions, fmt.Sprintf("@%s", p.JID.User))
-		jids = append(jids, p.JID)
 	}
 
-	body := "Tag-all:\n" + strings.Join(mentions, " ")
-	replyTextMention(context.Background(), client, chat, m, body, jids)
+	// Deteksi pola
+	if !isBangTagAll && !h.re.MatchString(t) {
+		return false
+	}
+
+	// Ambil info grup
+	gi, err := client.GetGroupInfo(m.Info.Chat)
+	if err != nil || gi == nil || len(gi.Participants) == 0 {
+		return false
+	}
+
+	// Kumpulkan semua JID member
+	var all []types.JID
+	for _, p := range gi.Participants {
+		all = append(all, p.JID)
+	}
+
+	// Kirim mention per-batch agar aman (WA kadang limit besar)
+	const batch = 25
+	for i := 0; i < len(all); i += batch {
+		end := i + batch
+		if end > len(all) {
+			end = len(all)
+		}
+		sub := all[i:end]
+		h.sendMention(client, m, sub, "👋 Halo semuanya, hadir ya!")
+	}
+
 	return true
 }
 
-func replyText(ctx context.Context, client *whatsmeow.Client, to types.JID, quoted *events.Message, msg string) {
+func (h *Handler) sendMention(client *whatsmeow.Client, m *events.Message, jids []types.JID, text string) {
 	ci := &waProto.ContextInfo{
-		StanzaID:      pbf.String(quoted.Info.ID),
-		QuotedMessage: quoted.Message,
-		Participant:   pbf.String(quoted.Info.Sender.String()),
-		RemoteJID:     pbf.String(quoted.Info.Chat.String()),
+		StanzaID:      pbf.String(m.Info.ID),
+		QuotedMessage: m.Message,
+		Participant:   pbf.String(m.Info.Sender.String()),
+		RemoteJID:     pbf.String(m.Info.Chat.String()),
 	}
-	_, _ = client.SendMessage(ctx, to, &waProto.Message{
-		ExtendedTextMessage: &waProto.ExtendedTextMessage{
-			Text:        pbf.String(msg),
-			ContextInfo: ci,
-		},
-	})
-}
-
-func replyTextMention(ctx context.Context, client *whatsmeow.Client, to types.JID, quoted *events.Message, text string, mentions []types.JID) {
-	ci := &waProto.ContextInfo{
-		StanzaID:      pbf.String(quoted.Info.ID),
-		QuotedMessage: quoted.Message,
-		Participant:   pbf.String(quoted.Info.Sender.String()),
-		RemoteJID:     pbf.String(quoted.Info.Chat.String()),
-	}
-	for _, j := range mentions {
+	for _, j := range jids {
 		ci.MentionedJID = append(ci.MentionedJID, j.String())
 	}
-	_, _ = client.SendMessage(ctx, to, &waProto.Message{
+
+	msg := &waProto.Message{
 		ExtendedTextMessage: &waProto.ExtendedTextMessage{
 			Text:        pbf.String(text),
 			ContextInfo: ci,
 		},
-	})
+	}
+	_, _ = client.SendMessage(context.Background(), m.Info.Chat, msg)
 }
