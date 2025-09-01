@@ -20,7 +20,7 @@ import (
 	"wa-elaina/internal/feature/rvo"
 	"wa-elaina/internal/feature/tagall"
 	"wa-elaina/internal/feature/tkwrap"
-	"wa-elaina/internal/feature/tts"     // ← NEW
+	"wa-elaina/internal/feature/tts"
 	"wa-elaina/internal/feature/vn"
 	"wa-elaina/internal/feature/vision"
 	"wa-elaina/internal/llm"
@@ -41,7 +41,7 @@ type Router struct {
 	hijab  *hijabin.Handler
 	vis    *vision.Handler
 	vnote  *vn.Handler
-	tts    *tts.Handler      // ← NEW
+	tts    *tts.Handler
 	tiktok *tkwrap.Handler
 	rvo    *rvo.Handler
 	tall   *tagall.Handler
@@ -67,7 +67,7 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool) *Router {
 	llm.Init(cfg)
 	rt.vis = vision.New(cfg, s, rt.reTrig, rt.owner)
 	rt.vnote = vn.New(cfg, s, rt.reTrig, rt.owner)
-	rt.tts = tts.New(cfg, rt.reTrig) // ← NEW
+	rt.tts = tts.New(cfg, rt.reTrig)
 	return rt
 }
 
@@ -115,15 +115,39 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		}
 	}
 
+	// ----------- GATE yang diperbaiki -----------
+	// Kebijakan: di GRUP, hanya balas bila teks yang DIKETIK user berisi trigger,
+	// kecuali jika ia mengirim command "!..." (biar fitur !rvo, !tagall tetap jalan).
+	_, _, isCmd := parseBang(origTxt)
+	isGroup := to.Server == types.GroupServer
+	hasTrig := r.reTrig.MatchString(origTxt)
+
+	// Khusus pesan gambar/video: di GRUP wajib ada trigger di CAPTION (atau command)
+	hasImage := m.Message.ImageMessage != nil
+	hasVideo := m.Message.VideoMessage != nil
+	if isGroup && (hasImage || hasVideo) && !hasTrig && !isCmd {
+		// tanpa trigger di caption → jangan proses fitur gambar sama sekali
+		return
+	}
+	// ------------------------------------------------
+
 	// ==== Fitur khusus ====
+	// Command-based features harus tetap dieksekusi (meskipun tanpa trigger).
 	if r.rvo.TryHandle(client, m, txt) { return }
 	if r.tall.TryHandle(client, m, txt) { return }
-	if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) { return }
-	if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) { return }
-	if r.vis.TryHandle(client, m, txt, isOwner) { return }
+
+	// Untuk fitur non-command di GRUP, hormati gate: wajib trigger.
+	allowNonCommand := !isGroup || hasTrig
+	if allowNonCommand {
+		if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) { return }
+		if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) { return }
+		if r.vis.TryHandle(client, m, txt, isOwner) { return }
+		if r.tts.TryHandle(client, m, txt) { return } // ← NEW
+		if r.tiktok.TryHandle(txt, to) { return }
+	}
+
+	// VN tetap dibiarkan seperti semula (handler sudah punya logika sebutan "elaina")
 	if r.vnote.TryHandle(client, m, isOwner) { return }
-	if r.tts.TryHandle(client, m, txt) { return } // ← NEW
-	if r.tiktok.TryHandle(txt, to) { return }
 
 	// ==== Reply-to-text: hanya aktif jika user MENYEBUT trigger ====
 	if quotedText != "" && r.reTrig.MatchString(origTxt) {
@@ -136,7 +160,6 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	}
 
 	// ==== Grup MANUAL: SELALU butuh trigger pada PESAN ASLI USER ====
-	isGroup := to.Server == types.GroupServer
 	if isGroup && strings.EqualFold(r.cfg.Mode, "MANUAL") {
 		if !r.reTrig.MatchString(origTxt) { return }
 		clean := strings.TrimSpace(r.reTrig.ReplaceAllString(strings.ToLower(origTxt), ""))
