@@ -3,7 +3,6 @@ package tkwrap
 import (
 	"net/http"
 	"regexp"
-	"strings"
 
 	"go.mau.fi/whatsmeow/types"
 
@@ -28,14 +27,18 @@ func New(cfg config.Config, s *wa.Sender) *Handler {
 			Slides: cfg.TTMaxSlides,
 		},
 	}
+
+	// Perluas cakupan: vt.tiktok.com, vm.tiktok.com, m.tiktok.com, www.tiktok.com
+	re := regexp.MustCompile(`(?i)https?://(?:(?:vt|vm|m|www)\.)?tiktok\.com/`)
+
 	return &Handler{
-		re: regexp.MustCompile(`https?://(www\.)?tiktok\.com/`),
+		re: re,
 		tk: h,
 	}
 }
 
 func (h *Handler) TryHandle(text string, to types.JID) bool {
-	if !h.re.MatchString(strings.ToLower(text)) {
+	if !h.re.MatchString(text) {
 		return false
 	}
 	return h.tk.TryHandle(text, to)

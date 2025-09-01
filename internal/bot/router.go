@@ -104,7 +104,7 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		log.Printf("[REPLY] chat=%s quoted{img:%t aud:%t textLen:%d}", m.Info.Chat.String(), quotedImg, quotedAud, len(quotedText))
 	}
 
-	// ==== Commands (reply) ====
+	// ==== Commands (reply) / bantuan singkat ====
 	if cmd, _, ok := parseBang(txt); ok {
 		switch cmd {
 		case "help":
@@ -115,9 +115,7 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		}
 	}
 
-	// ----------- GATE yang diperbaiki -----------
-	// Kebijakan: di GRUP, hanya balas bila teks yang DIKETIK user berisi trigger,
-	// kecuali jika ia mengirim command "!..." (biar fitur !rvo, !tagall tetap jalan).
+	// ----------- GATE & kebijakan trigger ----------
 	_, _, isCmd := parseBang(origTxt)
 	isGroup := to.Server == types.GroupServer
 	hasTrig := r.reTrig.MatchString(origTxt)
@@ -129,21 +127,44 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		// tanpa trigger di caption → jangan proses fitur gambar sama sekali
 		return
 	}
-	// ------------------------------------------------
 
-	// ==== Fitur khusus ====
-	// Command-based features harus tetap dieksekusi (meskipun tanpa trigger).
-	if r.rvo.TryHandle(client, m, txt) { return }
-	if r.tall.TryHandle(client, m, txt) { return }
+	// ====== Perbaikan deteksi TIKTOK (gabungkan field yang tersedia) ======
+	// Di beberapa build whatsmeow, CanonicalURL tidak tersedia.
+	// Pakai MatchedText + Text saja (dua-duanya cukup untuk mendeteksi URL).
+	tiktokText := origTxt
+	hasTrigTikTok := hasTrig
+	if ext := m.Message.GetExtendedTextMessage(); ext != nil {
+		if s := ext.GetMatchedText(); s != "" {
+			tiktokText += " " + s
+			if r.reTrig.MatchString(s) {
+				hasTrigTikTok = true
+			}
+		}
+		if s := ext.GetText(); s != "" && r.reTrig.MatchString(s) {
+			hasTrigTikTok = true
+		}
+	}
 
-	// Untuk fitur non-command di GRUP, hormati gate: wajib trigger.
+	// ====== Fitur PRIORITAS (langsung ke script, bukan LLM) ======
+	// RVO / TAGALL / TIKTOK: di PRIVATE bebas, di GRUP wajib ada trigger.
+	allowRvoTagall := !isGroup || hasTrig
+	if allowRvoTagall {
+		if r.rvo.TryHandle(client, m, txt) { return }
+		if r.tall.TryHandle(client, m, txt) { return }
+	}
+	allowTikTok := !isGroup || hasTrigTikTok
+	if allowTikTok {
+		// panggil handler dengan string gabungan agar regex bisa menemukan URL
+		if r.tiktok.TryHandle(tiktokText, to) { return }
+	}
+
+	// ----------- Non-command hanya boleh jika ada trigger (di grup) -----------
 	allowNonCommand := !isGroup || hasTrig
 	if allowNonCommand {
 		if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) { return }
 		if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) { return }
 		if r.vis.TryHandle(client, m, txt, isOwner) { return }
-		if r.tts.TryHandle(client, m, txt) { return } // ← NEW
-		if r.tiktok.TryHandle(txt, to) { return }
+		if r.tts.TryHandle(client, m, txt) { return }
 	}
 
 	// VN tetap dibiarkan seperti semula (handler sudah punya logika sebutan "elaina")
