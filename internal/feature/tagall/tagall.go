@@ -61,7 +61,7 @@ func (h *Handler) TryHandle(client *whatsmeow.Client, m *events.Message, text st
 	}
 
 	// Kirim mention per-batch agar aman (WA kadang limit besar)
-	const batch = 25
+	const batch = 500
 	for i := 0; i < len(all); i += batch {
 		end := i + batch
 		if end > len(all) {
