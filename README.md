@@ -219,6 +219,4 @@ PR dan issue welcome. Ikuti gaya kode Go standar (gofmt, golangci‑lint jika te
 
 ---
 
-## 📄 Lisensi
 
-Tentukan lisensi sesuai preferensi (mis. MIT/Apache‑2.0). Jika private, beri keterangan *All rights reserved*.
