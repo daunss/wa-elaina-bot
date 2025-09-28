@@ -40,21 +40,38 @@ func (h *Handler) TryHandleTo(client *whatsmeow.Client, to types.JID, msg *waPro
 	low := strings.ToLower(strings.TrimSpace(text))
 	hasMedia := hasImageOrVideo(msg)
 
-	if h.reCmd.MatchString(low) || h.reNat.MatchString(low) || (hasMedia && h.reEla.MatchString(low)) {
+	if h.reCmd.MatchString(low) {
 		return h.handleStickerTo(client, to, msg, low)
 	}
+	
+	if h.reNat.MatchString(low) && hasMedia {
+		return h.handleStickerTo(client, to, msg, low)
+	}
+	
+	if hasMedia && h.reEla.MatchString(low) && (strings.Contains(low, "stiker") || strings.Contains(low, "sticker")) {
+		return h.handleStickerTo(client, to, msg, low)
+	}
+	
 	return false
 }
 
-// Back-compat (tanpa JID)
 func (h *Handler) TryHandle(client *whatsmeow.Client, msg *waProto.Message, rawText string) bool {
 	text := getText(rawText, msg)
 	low := strings.ToLower(strings.TrimSpace(text))
 	hasMedia := hasImageOrVideo(msg)
 
-	if h.reCmd.MatchString(low) || h.reNat.MatchString(low) || (hasMedia && h.reEla.MatchString(low)) {
+	if h.reCmd.MatchString(low) {
 		return h.handleStickerTo(client, types.JID{}, msg, low)
 	}
+	
+	if h.reNat.MatchString(low) && hasMedia {
+		return h.handleStickerTo(client, types.JID{}, msg, low)
+	}
+	
+	if hasMedia && h.reEla.MatchString(low) && (strings.Contains(low, "stiker") || strings.Contains(low, "sticker")) {
+		return h.handleStickerTo(client, types.JID{}, msg, low)
+	}
+	
 	return false
 }
 
@@ -118,8 +135,6 @@ func (h *Handler) handleStickerTo(client *whatsmeow.Client, to types.JID, msg *w
 	}
 	return true
 }
-
-// ---------- helpers ----------
 
 func hasImageOrVideo(m *waProto.Message) bool {
 	if m.GetImageMessage() != nil || m.GetVideoMessage() != nil {
@@ -220,15 +235,13 @@ func getAbsolutePath(path string) string {
 		return ""
 	}
 	
-	// Jika sudah absolute path, return as is
 	if filepath.IsAbs(path) {
 		return path
 	}
 	
-	// Jika relative path, convert ke absolute
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		return path // fallback ke original path
+		return path
 	}
 	
 	return absPath
@@ -245,19 +258,19 @@ func findSystemFont() string {
 			"C:\\Windows\\Fonts\\tahoma.ttf",
 			"C:\\Windows\\Fonts\\segoeui.ttf",
 		}
-	case "darwin": // macOS
+	case "darwin":
 		possibleFonts = []string{
 			"/System/Library/Fonts/Arial.ttf",
 			"/System/Library/Fonts/Helvetica.ttc",
 			"/Library/Fonts/Arial.ttf",
 		}
-	default: // Linux
+	default:
 		possibleFonts = []string{
 			"/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
 			"/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
 			"/usr/share/fonts/TTF/arial.ttf",
 			"/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-			"/System/Library/Fonts/Arial.ttf", // untuk beberapa distro
+			"/System/Library/Fonts/Arial.ttf",
 		}
 	}
 	
@@ -278,21 +291,18 @@ func defaultFontFile() string {
 		}
 	}
 	
-	// Cari font system yang tersedia
 	systemFont := findSystemFont()
 	if systemFont != "" {
 		return systemFont
 	}
 	
-	// Fallback ke default berdasarkan OS
 	if runtime.GOOS == "windows" {
-		return "arial" // ffmpeg di Windows biasanya bisa detect font name
+		return "arial"
 	}
 	
-	return "DejaVu Sans" // fallback ke font name, bukan path
+	return "DejaVu Sans"
 }
 
-// toWebP: encode + watermark dengan perbaikan path dan font handling
 func toWebP(ctx context.Context, input []byte, animated bool) ([]byte, error) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
 		return nil, fmt.Errorf("ffmpeg tidak ditemukan di PATH")
@@ -314,14 +324,12 @@ func toWebP(ctx context.Context, input []byte, animated bool) ([]byte, error) {
 	wmAlpha := atofDef(getenv("STICKER_WM_ALPHA", "0.8"), 0.8)
 	wmImgScale := atoiDef(getenv("STICKER_WM_IMG_SCALE", "128"), 128)
 
-	// Convert relative path ke absolute path untuk watermark image
 	if wmImg != "" {
 		wmImg = getAbsolutePath(wmImg)
 	}
 	
 	useImg := fileExists(wmImg)
 
-	// Base filter memastikan kanvas 512x512
 	base := ""
 	if animated {
 		base = "fps=15,scale=512:-1:force_original_aspect_ratio=decrease:flags=lanczos," +
@@ -341,10 +349,8 @@ func toWebP(ctx context.Context, input []byte, animated bool) ([]byte, error) {
 	}
 
 	if useImg {
-		// Convert backslash ke forward slash untuk Windows compatibility
 		wmImgPath := strings.ReplaceAll(wmImg, "\\", "/")
 		
-		// Dua input → gunakan -filter_complex
 		args = []string{
 			"-y",
 			"-i", in,
@@ -356,23 +362,19 @@ func toWebP(ctx context.Context, input []byte, animated bool) ([]byte, error) {
 		args = append(args, codec...)
 		args = append(args, out)
 	} else {
-		// Satu input + drawtext dengan improved font handling
 		font := defaultFontFile()
 		
-		// Escape text untuk ffmpeg
 		escaped := strings.ReplaceAll(wmText, ":", "\\:")
 		escaped = strings.ReplaceAll(escaped, "'", "\\'")
-		escaped = strings.ReplaceAll(escaped, "\\", "\\\\") // escape backslashes
+		escaped = strings.ReplaceAll(escaped, "\\", "\\\\")
 		
 		var vf string
 		if fileExists(font) {
-			// Gunakan fontfile jika font path valid
-			fontPath := strings.ReplaceAll(font, "\\", "/") // convert ke forward slash
-			fontPath = strings.ReplaceAll(fontPath, ":", "\\:") // escape colon
+			fontPath := strings.ReplaceAll(font, "\\", "/")
+			fontPath = strings.ReplaceAll(fontPath, ":", "\\:")
 			vf = fmt.Sprintf(`%s,drawtext=fontfile='%s':text='%s':fontcolor=white@%0.2f:fontsize=%d:box=1:boxcolor=0x00000088:boxborderw=6:x=w-tw-%d:y=h-th-%d`,
 				base, fontPath, escaped, wmAlpha, wmSize, wmMargin, wmMargin)
 		} else {
-			// Gunakan font name tanpa path
 			vf = fmt.Sprintf(`%s,drawtext=font='%s':text='%s':fontcolor=white@%0.2f:fontsize=%d:box=1:boxcolor=0x00000088:boxborderw=6:x=w-tw-%d:y=h-th-%d`,
 				base, font, escaped, wmAlpha, wmSize, wmMargin, wmMargin)
 		}
@@ -386,7 +388,6 @@ func toWebP(ctx context.Context, input []byte, animated bool) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	cmd.Stderr = &stderr
 	
-	// Set environment untuk mengurangi fontconfig errors
 	cmd.Env = append(os.Environ(), 
 		"FONTCONFIG_FILE=/dev/null",
 		"FC_CONFIG_FILE=/dev/null",
@@ -404,7 +405,7 @@ func toWebP(ctx context.Context, input []byte, animated bool) ([]byte, error) {
 }
 
 func sendStickerBytes(ctx context.Context, client *whatsmeow.Client, to types.JID, in *waProto.Message, webp []byte, animated bool) error {
-	_ = animated // aktifkan jika proto punya IsAnimated
+	_ = animated
 
 	uploaded, err := client.Upload(ctx, webp, whatsmeow.MediaImage)
 	if err != nil {
@@ -443,8 +444,6 @@ func sendStickerBytes(ctx context.Context, client *whatsmeow.Client, to types.JI
 		FileLength:    pbf.Uint64(uint64(len(webp))),
 		MediaKey:      uploaded.MediaKey,
 		ContextInfo:   ci,
-		// Jika proto menyediakan:
-		// IsAnimated: pbf.Bool(animated),
 	}
 
 	_, err = client.SendMessage(ctx, jid, &waProto.Message{StickerMessage: sticker})

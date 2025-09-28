@@ -42,6 +42,8 @@ type Config struct {
 	TTMaxImage  int64
 	TTMaxDoc    int64
 	TTMaxSlides int
+
+	 GeminiAPIKey string `env:"GEMINI_API_KEY" envDefault:""`
 }
 
 // Load memuat konfigurasi dari .env + environment, dengan default aman.

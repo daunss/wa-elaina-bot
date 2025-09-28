@@ -16,7 +16,9 @@ import (
 
 	"wa-elaina/internal/config"
 	"wa-elaina/internal/feature/baimg"
+	"wa-elaina/internal/feature/brat"
 	"wa-elaina/internal/feature/hijabin"
+	"wa-elaina/internal/feature/imggen" // Import image generation handler
 	"wa-elaina/internal/feature/owner"
 	"wa-elaina/internal/feature/rvo"
 	"wa-elaina/internal/feature/tagall"
@@ -31,7 +33,6 @@ import (
 	"wa-elaina/internal/feature/sticker"
 )
 
-// cue kata-kunci yang menandakan "balas yang direply"
 var reReplyCue = regexp.MustCompile(`(?i)\b(balas(in|lah)?|reply|jawab(in|lah)?)(\s+ini)?\b`)
 
 type Router struct {
@@ -50,9 +51,9 @@ type Router struct {
 	tiktok *tkwrap.Handler
 	rvo    *rvo.Handler
 	tall   *tagall.Handler
-
-	// === Tambahan fitur sticker ===
 	stik   *sticker.Handler
+	brat   *brat.Handler
+	imggen *imggen.Handler // Tambah image generation handler
 }
 
 func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool, store *db.Store) *Router {
@@ -60,11 +61,13 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool, store *db.St
 	if trig == "" {
 		trig = "elaina"
 	}
+	reTrig := regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(trig) + `\b`)
+	
 	rt := &Router{
 		cfg:    cfg,
 		send:   s,
 		ready:  ready,
-		reTrig: regexp.MustCompile(`(?i)\b` + regexp.QuoteMeta(trig) + `\b`),
+		reTrig: reTrig,
 		store:  store,
 		owner:  owner.NewFromEnv(),
 		ba:     baimg.New(cfg),
@@ -72,14 +75,17 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool, store *db.St
 		tiktok: tkwrap.New(cfg, s),
 		rvo:    rvo.New(),
 		tall:   tagall.New(trig),
+		stik:   sticker.New(),
+		imggen: imggen.New(cfg), // Initialize image generation handler
 	}
+	
+	// Initialize handlers yang membutuhkan rt setelah struct dibuat
+	rt.brat = brat.New(rt.reTrig)
+	
 	llm.Init(cfg)
 	rt.vis = vision.New(cfg, s, rt.reTrig, rt.owner)
 	rt.vnote = vn.New(cfg, s, rt.reTrig, rt.owner)
 	rt.tts = tts.New(cfg, rt.reTrig)
-
-	// === Tambahan: inisialisasi handler sticker ===
-	rt.stik = sticker.New()
 
 	return rt
 }
@@ -91,12 +97,11 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 
 	to := m.Info.Chat
 	txt := extractText(m)
-	origTxt := txt // simpan teks ASLI user untuk validasi trigger di MANUAL mode
+	origTxt := txt
 
 	isOwner := r.owner.IsOwner(m.Info)
 	r.owner.Debug(m.Info, isOwner)
 
-	// ==== DETEKSI REPLY (QUOTED) ====
 	var (
 		quotedImg  = false
 		quotedAud  = false
@@ -117,18 +122,21 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		log.Printf("[REPLY] chat=%s quoted{img:%t aud:%t textLen:%d}", m.Info.Chat.String(), quotedImg, quotedAud, len(quotedText))
 	}
 
-	// ==== Commands (reply) / bantuan singkat ====
+	// PRIORITAS TERTINGGI: IMAGE GENERATION - cek pertama kali
+	if r.imggen.TryHandle(client, m, origTxt, isOwner) {
+		return
+	}
+
 	if cmd, _, ok := parseBang(txt); ok {
 		switch cmd {
 		case "help":
 			replyText(context.Background(), client, m,
-				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall / elaina tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• elaina vn <teks> — kirim voice note\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM\n• !elaina persona elaina1|elaina2 — pilih persona AI (persist)\n• !elaina mode pro on|off — aktifkan Mode Pro (persist)")
+				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall / elaina tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• elaina vn <teks> — kirim voice note\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM\n• elaina brat <teks> — buat sticker brat\n• elaina buatin gambar <prompt> / !gambar <prompt> — generate gambar AI\n• !elaina persona elaina1|elaina2 — pilih persona AI (persist)\n• !elaina mode pro on|off — aktifkan Mode Pro (persist)")
 		case "whoami":
 			replyText(context.Background(), client, m, "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String())
 		case "elaina":
 			after := strings.TrimSpace(strings.TrimPrefix(txt, "!elaina"))
 			parts := strings.Fields(after)
-			// persona
 			if len(parts) >= 2 && strings.EqualFold(parts[0], "persona") {
 				p := strings.ToLower(parts[1])
 				if p == "1" {
@@ -145,7 +153,6 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 				replyText(context.Background(), client, m, "Persona disetel ke "+p+" untuk chat ini ✅")
 				return
 			}
-			// mode pro
 			if len(parts) >= 3 && strings.EqualFold(parts[0], "mode") && strings.EqualFold(parts[1], "pro") {
 				on := strings.EqualFold(parts[2], "on") || strings.EqualFold(parts[2], "enable")
 				_ = r.store.SetPro(m.Info.Chat.String(), on)
@@ -161,26 +168,22 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		}
 	}
 
-	// ----------- GATE & kebijakan trigger ----------
 	cmd, _, isCmd := parseBang(origTxt)
 	isGroup := to.Server == types.GroupServer
 	hasTrig := r.reTrig.MatchString(origTxt)
 	isTagAllCmd := isCmd && strings.EqualFold(cmd, "tagall")
 
-	// === NEW: Early guard untuk semua pesan yang merupakan REPLY ===
 	hasQuoted := quotedImg || quotedAud || quotedText != ""
 	if hasQuoted && !hasTrig && !isCmd {
 		return
 	}
 
-	// Khusus pesan gambar/video: di GRUP wajib ada trigger di CAPTION (atau command)
 	hasImage := m.Message.ImageMessage != nil
 	hasVideo := m.Message.VideoMessage != nil
 	if isGroup && (hasImage || hasVideo) && !hasTrig && !isCmd {
 		return
 	}
 
-	// ====== Deteksi TIKTOK (gabungkan field yang tersedia) ======
 	tiktokText := origTxt
 	hasTrigTikTok := hasTrig
 	if ext := m.Message.GetExtendedTextMessage(); ext != nil {
@@ -195,34 +198,36 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		}
 	}
 
-	// ====== Fitur PRIORITAS (langsung ke script, bukan LLM) ======
 	allowRvoTagall := !isGroup || hasTrig || isTagAllCmd
 	if allowRvoTagall {
 		if r.rvo.TryHandle(client, m, txt) { return }
 		if r.tall.TryHandle(client, m, txt) { return }
 	}
 
-	// === Tambahan: Sticker (img/gif → webp) — taruh sebelum TikTok agar URL tidak diambil handler lain ===
-	if r.stik.TryHandleTo(client, m.Info.Chat, m.Message, txt) { return }
-
 	allowTikTok := !isGroup || hasTrigTikTok
 	if allowTikTok {
 		if r.tiktok.TryHandle(tiktokText, to) { return }
 	}
 
-	// ----------- Non-command hanya boleh jika ada trigger (di grup) -----------
 	allowNonCommand := !isGroup || hasTrig
 	if allowNonCommand {
 		if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) { return }
 		if r.hijab.TryHandle(client, m, txt, isOwner, r.reTrig) { return }
+		
+		// PRIORITAS BRAT STICKER - cek sebelum sticker biasa
+		if r.brat.TryHandle(client, m, txt, isOwner) { return }
+		
+		// PRIORITASKAN STICKER SEBELUM VISION
+		if r.stik.TryHandleTo(client, m.Info.Chat, m.Message, txt) { return }
+		
+		// Baru cek vision setelah sticker tidak match
 		if r.vis.TryHandle(client, m, txt, isOwner) { return }
+		
 		if r.tts.TryHandle(client, m, txt) { return }
 	}
 
-	// VN
 	if r.vnote.TryHandle(client, m, isOwner) { return }
 
-	// ==== Reply-to-text: hanya aktif jika user menyebut trigger ====
 	if quotedText != "" && r.reTrig.MatchString(origTxt) {
 		after := strings.TrimSpace(r.reTrig.ReplaceAllString(origTxt, ""))
 		if after == "" || reReplyCue.MatchString(after) {
@@ -232,7 +237,6 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		}
 	}
 
-	// ==== Grup MANUAL: perlu trigger pada pesan asli user ====
 	if isGroup && strings.EqualFold(r.cfg.Mode, "MANUAL") {
 		if !r.reTrig.MatchString(origTxt) && !isTagAllCmd {
 			return
@@ -245,27 +249,22 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 		}
 	}
 
-	// ==== LLM (pakai persona + mode pro dari DB) ====
 	if strings.TrimSpace(txt) == "" {
 		return
 	}
 	state, _ := r.store.Get(m.Info.Chat.String())
 
-	//muat memory & padukan ke prompt
 	hist, _ := memory.Load(m.Info.Chat.String())
 	ctxTxt := memory.BuildContext(hist, txt)
 
 	reply := llm.AskAsPersona(r.cfg, state.Persona, state.Pro, ctxTxt, time.Now())
 
-	//simpan turn terbaru
 	_ = memory.SaveTurn(m.Info.Chat.String(), "user", txt)
 	_ = memory.SaveTurn(m.Info.Chat.String(), "assistant", reply)
 
 	txtOut, mentions := r.owner.Decorate(isOwner, reply)
 	replyTextMention(context.Background(), client, m, txtOut, mentions)
 }
-
-// ---- reply helpers ----
 
 func replyText(ctx context.Context, client *whatsmeow.Client, m *events.Message, msg string) {
 	ci := &waProto.ContextInfo{
@@ -300,7 +299,6 @@ func replyTextMention(ctx context.Context, client *whatsmeow.Client, m *events.M
 	})
 }
 
-// ---- small helpers ----
 func extractText(m *events.Message) string {
 	if m.Message.GetConversation() != "" {
 		return m.Message.GetConversation()
