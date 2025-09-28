@@ -17,9 +17,12 @@ type Config struct {
 	Trigger   string
 	Port      string
 
+	// State DB (persist persona & pro per JID)
+	StateDB string
+
 	// Auth & rate limit
-	SendAPIKey      string
-	SendRatePerMin  int
+	SendAPIKey     string
+	SendRatePerMin int
 
 	// Gemini
 	GeminiKeys []string
@@ -47,6 +50,7 @@ func Load() Config {
 
 	cfg := Config{
 		SessionDB:      getenv("SESSION_PATH", "session.db"),
+		StateDB:        getenv("STATE_DB", "elaina_state.db"),
 		BotName:        getenv("BOT_NAME", "Elaina"),
 		Mode:           strings.ToUpper(getenv("MODE", "MANUAL")),
 		Trigger:        strings.ToLower(getenv("TRIGGER", "elaina")),

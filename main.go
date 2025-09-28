@@ -19,6 +19,7 @@ import (
 	"wa-elaina/internal/config"
 	"wa-elaina/internal/httpapi"
 	"wa-elaina/internal/wa"
+	"wa-elaina/internal/db"
 
 	// Welcome handler
 	wel "wa-elaina/internal/feature/welcome"
@@ -49,8 +50,15 @@ func main() {
 	client := whatsmeow.NewClient(device, nil)
 	sender := wa.NewSender(client)
 
+	// === OPEN STATE DB (persona & pro-mode persist) ===
+	stateStore, err := db.Open(cfg.StateDB)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = stateStore.Close() }()
+
 	// Router semua fitur (untuk pesan/chat)
-	rt := bot.NewRouter(cfg, sender, &waReady)
+	rt := bot.NewRouter(cfg, sender, &waReady, stateStore)
 
 	// Welcome handler dari ENV
 	welH := wel.NewFromEnv()

@@ -25,6 +25,7 @@ vendor/
 *.key
 *.pem
 session.db
+elaina_state.db
 
 # Docker
 *.tar
