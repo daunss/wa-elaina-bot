@@ -98,6 +98,7 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	to := m.Info.Chat
 	txt := extractText(m)
 	origTxt := txt
+	senderJID := m.Info.Sender.String() // JID untuk tracking nama
 
 	isOwner := r.owner.IsOwner(m.Info)
 	r.owner.Debug(m.Info, isOwner)
@@ -130,10 +131,37 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	if cmd, _, ok := parseBang(txt); ok {
 		switch cmd {
 		case "help":
+			// Ambil nama pengguna untuk personalisasi help
+			userName, _ := memory.GetUserName(senderJID)
+			greeting := "Hai!"
+			if userName != "" {
+				greeting = "Hai " + userName + "!"
+			}
+			
 			replyText(context.Background(), client, m,
-				"Perintah:\n• !help — bantuan\n• !whoami — lihat JID/LID kamu\n• !tagall / elaina tagall — mention semua anggota grup\n• !rvo — buka media sekali lihat (reply ke pesannya)\n• ba / kirim gambar blue archive — gambar BA\n• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n• elaina vn <teks> — kirim voice note\n• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n• VN sebut 'elaina' — transkrip & jawab\n• Kirim link TikTok — unduh via TikWM\n• elaina brat <teks> — buat sticker brat\n• elaina buatin gambar <prompt> / !gambar <prompt> — generate gambar AI\n• !elaina persona elaina1|elaina2 — pilih persona AI (persist)\n• !elaina mode pro on|off — aktifkan Mode Pro (persist)")
+				greeting + " Ini perintah yang bisa kamu gunakan:\n\n"+
+				"• !help — bantuan\n"+
+				"• !whoami — lihat JID/LID kamu\n"+
+				"• !tagall / elaina tagall — mention semua anggota grup\n"+
+				"• !rvo — buka media sekali lihat (reply ke pesannya)\n"+
+				"• ba / kirim gambar blue archive — gambar BA\n"+
+				"• elaina hijabin — berhijabkan gambar (kirim/quote gambar)\n"+
+				"• elaina vn <teks> — kirim voice note\n"+
+				"• Kirim gambar + sebut '"+r.cfg.Trigger+"' — analisis gambar\n"+
+				"• VN sebut 'elaina' — transkrip & jawab\n"+
+				"• Kirim link TikTok — unduh via TikWM\n"+
+				"• elaina brat <teks> — buat sticker brat\n"+
+				"• elaina buatin gambar <prompt> / !gambar <prompt> — generate gambar AI\n"+
+				"• !elaina persona elaina1|elaina2 — pilih persona AI (persist)\n"+
+				"• !elaina mode pro on|off — aktifkan Mode Pro (persist)\n\n"+
+				"*Tips:* Katakan \"panggil aku [nama]\" untuk aku ingat namamu! ✨")
 		case "whoami":
-			replyText(context.Background(), client, m, "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String())
+			userName, _ := memory.GetUserName(senderJID)
+			whoamiText := "Sender: "+m.Info.Sender.String()+"\nChat  : "+m.Info.Chat.String()
+			if userName != "" {
+				whoamiText += "\nNama tersimpan: " + userName
+			}
+			replyText(context.Background(), client, m, whoamiText)
 		case "elaina":
 			after := strings.TrimSpace(strings.TrimPrefix(txt, "!elaina"))
 			parts := strings.Fields(after)
@@ -252,12 +280,29 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 	if strings.TrimSpace(txt) == "" {
 		return
 	}
+
+	// Prioritas: Cek apakah ini permintaan perubahan nama SEBELUM masuk ke LLM
+	if name, isNameRequest := memory.DetectNameRequest(txt); isNameRequest {
+		if err := memory.SetUserName(senderJID, name); err == nil {
+			reply := "*Oke! Mulai sekarang aku akan memanggilmu " + name + "* ✨\n\n_Senang berkenalan denganmu, " + name + "!_ Aku Elaina, penyihir cantik dan berbakat~ 🌟"
+			txtOut, mentions := r.owner.Decorate(isOwner, reply)
+			replyTextMention(context.Background(), client, m, txtOut, mentions)
+			
+			// Simpan interaksi ini ke memory
+			_ = memory.SaveTurn(m.Info.Chat.String(), "user", txt)
+			_ = memory.SaveTurn(m.Info.Chat.String(), "assistant", reply)
+			return
+		}
+	}
+
 	state, _ := r.store.Get(m.Info.Chat.String())
 
 	hist, _ := memory.Load(m.Info.Chat.String())
-	ctxTxt := memory.BuildContext(hist, txt)
+	// Gunakan Chat JID untuk memory, Sender JID untuk nama
+	ctxTxt := memory.BuildContext(hist, txt, senderJID)
 
-	reply := llm.AskAsPersona(r.cfg, state.Persona, state.Pro, ctxTxt, time.Now())
+	// Pass senderJID ke AskAsPersona untuk nama
+	reply := llm.AskAsPersona(r.cfg, state.Persona, state.Pro, ctxTxt, senderJID, time.Now())
 
 	_ = memory.SaveTurn(m.Info.Chat.String(), "user", txt)
 	_ = memory.SaveTurn(m.Info.Chat.String(), "assistant", reply)
