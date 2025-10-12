@@ -80,7 +80,7 @@ func Transcribe(audio []byte, mime string) string {
 }
 
 func send(key string, body any) (string, int) {
-	endpoint := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key="+key
+	endpoint := "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key="+key
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(b))
 	req.Header.Set("Content-Type","application/json")

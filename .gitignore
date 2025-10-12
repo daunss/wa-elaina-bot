@@ -31,4 +31,6 @@ elaina_state.db
 *.tar
 *.bak
 Dockerfile.old
+
+# Editor
 data
