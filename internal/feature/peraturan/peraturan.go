@@ -19,6 +19,7 @@ import (
 )
 
 const redeemKeyword = "mengurangi warn"
+const warnLimit = 5
 
 type Handler struct {
 	store   *db.Store
@@ -145,12 +146,12 @@ func (h *Handler) handleWarn(ctx context.Context, cli *whatsmeow.Client, m *even
 		log.Printf("[PERATURAN] add warn error: %v", err)
 		return
 	}
-
-	warnText := fmt.Sprintf("*Peringatan %d/3 untuk @%s*\nAlasan: %s", rec.Count, m.Info.Sender.User, reason)
+	warnText := fmt.Sprintf("*Peringatan %d/%d untuk @%s*\nAlasan: %s", rec.Count, warnLimit, m.Info.Sender.User, reason)
 	h.sendMention(cli, m, warnText, []types.JID{m.Info.Sender})
 
-	if rec.Count > 3 {
-		if _, err := cli.UpdateGroupParticipants(m.Info.Chat, []types.JID{m.Info.Sender}, whatsmeow.ParticipantChangeRemove); err != nil {
+	if rec.Count >= warnLimit {
+		target := m.Info.Sender.ToNonAD()
+		if _, err := cli.UpdateGroupParticipants(m.Info.Chat, []types.JID{target}, whatsmeow.ParticipantChangeRemove); err != nil {
 			log.Printf("[PERATURAN] gagal keluarkan %s: %v", m.Info.Sender.String(), err)
 			return
 		}
@@ -183,7 +184,7 @@ func (h *Handler) handleRedeem(ctx context.Context, cli *whatsmeow.Client, m *ev
 		h.sendMention(cli, m, fmt.Sprintf("*%s, warn kamu sudah 0. Tetap jaga kedisiplinan ya.*", "@"+m.Info.Sender.User), []types.JID{m.Info.Sender})
 		return
 	}
-	h.sendMention(cli, m, fmt.Sprintf("*Warn kamu berkurang menjadi %d/3.*", rec.Count), []types.JID{m.Info.Sender})
+	h.sendMention(cli, m, fmt.Sprintf("*Warn kamu berkurang menjadi %d/%d.*", rec.Count, warnLimit), []types.JID{m.Info.Sender})
 }
 
 func (h *Handler) enable(cli *whatsmeow.Client, m *events.Message) bool {
@@ -275,7 +276,7 @@ func (h *Handler) status(cli *whatsmeow.Client, m *events.Message) bool {
 			limit = 5
 		}
 		for i := 0; i < limit; i++ {
-			builder.WriteString(fmt.Sprintf("%d. %s - %d/3\n", i+1, warns[i].User, warns[i].Count))
+			builder.WriteString(fmt.Sprintf("%d. %s - %d/%d\n", i+1, warns[i].User, warns[i].Count, warnLimit))
 		}
 	}
 	h.replyText(cli, m, builder.String())
