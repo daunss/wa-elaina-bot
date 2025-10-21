@@ -37,13 +37,16 @@ type Config struct {
 	BALinksURL   string
 	BALinksLocal string
 
+	// Pap feature
+	PapLinksPath string
+
 	// TikTok limits (bytes)
 	TTMaxVideo  int64
 	TTMaxImage  int64
 	TTMaxDoc    int64
 	TTMaxSlides int
 
-	 GeminiAPIKey string `env:"GEMINI_API_KEY" envDefault:""`
+	GeminiAPIKey string `env:"GEMINI_API_KEY" envDefault:""`
 }
 
 // Load memuat konfigurasi dari .env + environment, dengan default aman.
@@ -65,6 +68,7 @@ func Load() Config {
 		VNMaxWords:     mustAtoi(getenv("VN_MAX_WORDS", "80")),
 		BALinksURL:     getenv("BA_LINKS_URL", ""),
 		BALinksLocal:   getenv("BA_LINKS_LOCAL", "anime/bluearchive_links.json"),
+		PapLinksPath:   getenv("PAP_LINKS_PATH", "anime/pap_links.json"),
 		TTMaxVideo:     int64(mustAtoi(getenv("TIKTOK_MAX_VIDEO_MB", "50"))) << 20,
 		TTMaxImage:     int64(mustAtoi(getenv("TIKTOK_MAX_IMAGE_MB", "5"))) << 20,
 		TTMaxDoc:       int64(mustAtoi(getenv("TIKTOK_MAX_DOC_MB", "80"))) << 20,

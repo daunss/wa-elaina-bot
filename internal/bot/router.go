@@ -23,6 +23,7 @@ import (
 	"wa-elaina/internal/feature/hijabin"
 	"wa-elaina/internal/feature/imggen" // Import image generation handler
 	"wa-elaina/internal/feature/owner"
+	"wa-elaina/internal/feature/pap"
 	"wa-elaina/internal/feature/peraturan"
 	"wa-elaina/internal/feature/rvo"
 	"wa-elaina/internal/feature/sticker"
@@ -59,6 +60,7 @@ type Router struct {
 	brat      *brat.Handler
 	imggen    *imggen.Handler // Tambah image generation handler
 	peraturan *peraturan.Handler
+	pap       *pap.Handler
 }
 
 func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool, store *db.Store) *Router {
@@ -83,6 +85,7 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool, store *db.St
 		tall:   tagall.New(trig),
 		stik:   sticker.New(),
 		imggen: imggen.New(cfg), // Initialize image generation handler
+		pap:    pap.New(cfg),
 	}
 
 	// Initialize handlers yang membutuhkan rt setelah struct dibuat
@@ -94,7 +97,6 @@ func NewRouter(cfg config.Config, s *wa.Sender, ready *atomic.Bool, store *db.St
 	rt.anime = anime.New(rt.reTrig, s)
 	rt.peraturan = peraturan.New(store)
 	rt.tts = tts.New(cfg, rt.reTrig)
-
 	return rt
 }
 
@@ -269,6 +271,9 @@ func (r *Router) HandleMessage(client *whatsmeow.Client, m *events.Message) {
 
 	allowNonCommand := !isGroup || hasTrig
 	if allowNonCommand {
+		if r.pap != nil && r.pap.TryHandle(client, m, origTxt) {
+			return
+		}
 		if r.ba.TryHandleText(context.Background(), client, m, txt, isOwner) {
 			return
 		}
@@ -404,6 +409,9 @@ func extractText(m *events.Message) string {
 	}
 	if v := m.Message.GetVideoMessage(); v != nil && v.GetCaption() != "" {
 		return v.GetCaption()
+	}
+	if doc := m.Message.GetDocumentMessage(); doc != nil && doc.GetCaption() != "" {
+		return doc.GetCaption()
 	}
 	return ""
 }

@@ -12,14 +12,7 @@ import (
 	"time"
 )
 
-// TikTok (TikWM only)
-// =========================
 
-// Regex luas untuk berbagai bentuk URL TikTok:
-// - vt.tiktok.com/...
-// - www.tiktok.com/@user/video/ID
-// - m.tiktok.com/...
-// - tiktok.com/v/..., dsb.
 var reTikTok = regexp.MustCompile(`https?://(?:vt\.)?tiktok\.com/[^\s]+|https?://(?:www\.|m\.)?tiktok\.com/(?:@[A-Za-z0-9._-]+/video/\d+|v/[^\s]+|[^\s]+)`)
 
 // DetectTikTokURLs mengekstrak semua URL TikTok dari teks.
@@ -96,8 +89,6 @@ func getFromTikwm(client *http.Client, link string) (video, audio string, images
 	return
 }
 
-// GetTikTokFromTikwm menerima daftar URL, memilih yang pertama,
-// (opsional) expand vt.tiktok.com, lalu memanggil TikWM.
 // Mengembalikan video, audio, dan list images (untuk Slide).
 func GetTikTokFromTikwm(client *http.Client, urls []string) (videoURL, audioURL string, images []string, err error) {
 	raw := firstNonEmptyURL(urls)
