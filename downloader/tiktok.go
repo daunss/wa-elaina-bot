@@ -15,7 +15,7 @@ import (
 
 var reTikTok = regexp.MustCompile(`https?://(?:vt\.)?tiktok\.com/[^\s]+|https?://(?:www\.|m\.)?tiktok\.com/(?:@[A-Za-z0-9._-]+/video/\d+|v/[^\s]+|[^\s]+)`)
 
-// DetectTikTokURLs mengekstrak semua URL TikTok dari teks.
+// DetectTikTokURLs mengekstrak semua URL TikTok
 func DetectTikTokURLs(text string) []string {
 	return reTikTok.FindAllString(text, -1)
 }
@@ -53,7 +53,7 @@ type tikwmResp struct {
 	Data struct {
 		Play   string   `json:"play"`   // URL mp4 (no watermark)
 		Music  string   `json:"music"`  // URL mp3
-		Images []string `json:"images"` // Daftar URL slide (jika konten berupa foto)
+		Images []string `json:"images"` // Daftar URL slide 
 	} `json:"data"`
 }
 
