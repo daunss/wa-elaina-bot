@@ -4,7 +4,7 @@ Asisten WhatsApp berkarakter **Elaina**: ngobrol natural (Gemini), jawab **gamba
 
 ---
 
-## ✨ Fitur Utama
+## Fitur Utama
 
 * **Chat AI berkarakter “Elaina”**
 
@@ -32,7 +32,7 @@ Asisten WhatsApp berkarakter **Elaina**: ngobrol natural (Gemini), jawab **gamba
 
 ---
 
-## 🧩 Arsitektur Singkat
+## Arsitektur Singkat
 
 * `main.go` — wiring WA client, router pesan, persona, handler Vision/VN, Gemini calls.
 * `internal/wa/` — util pengiriman (text, audio, gambar, dokumen) via whatsmeow.
@@ -45,7 +45,7 @@ DB sesi WhatsApp: **SQLite** (pure Go driver `modernc.org/sqlite`) — cukup sat
 
 ---
 
-## ⚙️ Prasyarat
+## Prasyarat
 
 * **Go 1.22+**
 * **Akun Google Gemini** (API key)
@@ -53,7 +53,7 @@ DB sesi WhatsApp: **SQLite** (pure Go driver `modernc.org/sqlite`) — cukup sat
 
 ---
 
-## 🚀 Quickstart (Local)
+## Quickstart (Local)
 
 1. **Clone & install deps**
 
@@ -116,7 +116,7 @@ VN_DEBUG_TRANSCRIPT=false   # true = kirim transkrip saat tak ada sebutan “Ela
 
 ---
 
-## 🕹️ Cara Pakai (WhatsApp)
+## Cara Pakai (WhatsApp)
 
 * **Obrolan teks:** kirim pesan ke bot. Di grup (MODE=MANUAL), panggil dengan `elaina`/`@elaina`.
 * **Vision:** kirim **gambar** (dengan/ tanpa caption). Bot menjawab deskripsi/insight singkat.
@@ -131,7 +131,7 @@ VN_DEBUG_TRANSCRIPT=false   # true = kirim transkrip saat tak ada sebutan “Ela
 
 ---
 
-## 🌐 HTTP API
+## HTTP API
 
 ### `GET /healthz`
 
@@ -157,7 +157,7 @@ Kirim pesan WA ke JID tertentu dari aplikasi eksternal.
 
 ---
 
-## 🐳 Deploy di Pterodactyl
+## Deploy di Pterodactyl
 
 **Image:** `ghcr.io/parkervcp/yolks:golang_1.22`
 
@@ -186,7 +186,7 @@ bash -lc 'export CGO_ENABLED=0 GOOS=linux GOARCH=amd64; \
 
 ---
 
-## 🔐 Keamanan & Privasi
+## Keamanan & Privasi
 
 * **API Key**: lindungi endpoint `/send` dengan `SEND_API_KEY` dan rate limit. Tambah whitelist JID bila perlu.
 * **Penyimpanan**: file sesi WA berisi kredensial login — simpan di disk yang aman & persisten.
@@ -194,7 +194,7 @@ bash -lc 'export CGO_ENABLED=0 GOOS=linux GOARCH=amd64; \
 
 ---
 
-## 🧪 Troubleshooting
+## Troubleshooting
 
 * **VN tak dibalas**: pastikan ucapan menyebut “Elaina” (variasi *eleina/elena/elina* juga dideteksi). Aktifkan `VN_DEBUG_TRANSCRIPT=true` untuk melihat transkrip.
 * **Video terlalu besar**: bot akan fallback ke dokumen/tautan jika melewati batas. Perbesar limit via env `TIKTOK_MAX_*` (hati‑hati kuota).
@@ -203,7 +203,7 @@ bash -lc 'export CGO_ENABLED=0 GOOS=linux GOARCH=amd64; \
 
 ---
 
-## 🗺️ Roadmap (opsional)
+## Roadmap (opsional)
 
 * **Memory percakapan per‑JID** (konteks follow‑up)
 * **Admin controls via chat** (`!mode`, `!vn require_mention`, `!voice`)
